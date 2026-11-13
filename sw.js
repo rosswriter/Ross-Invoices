@@ -1,7 +1,7 @@
 // Keeps a copy of Ross Invoices on the device, so it opens with no connection.
 // A new version (a new CACHE name) is fetched in the background and used the
 // next time the app is opened.
-const CACHE = "ross-invoices-1.0.0";
+const CACHE = "ross-invoices-1.1.0";
 const FILES = [
   "./", "index.html", "manifest.webmanifest", "css/app.css",
   "js/app.js", "js/ui.js", "js/store.js", "js/money.js", "js/pdf.js", "js/files.js",

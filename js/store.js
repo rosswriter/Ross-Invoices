@@ -9,7 +9,8 @@ export const KEEP_BACKUPS = 30;
 export const DEFAULT_SETTINGS = {
   business: { name: "Jacob Ross", address: "", email: "", phone: "", website: "" },
   numbering: { prefix: "INV-", next: 1, digits: 4 },
-  defaults: { currency: "GBP", terms_days: 30, tax_rate: "0", tax_label: "VAT", account: "" },
+  estimate_numbering: { prefix: "EST-", next: 1, digits: 4 },
+  defaults: { currency: "GBP", terms_days: 30, valid_days: 30, tax_rate: "0", tax_label: "VAT", account: "" },
   thanks: "THANK YOU",
   note: "Thank you for your business.",
   accounts: [],
@@ -72,7 +73,7 @@ export class Store {
   }
 
   static empty() {
-    return { format: FORMAT, version: 1, settings: clone(DEFAULT_SETTINGS), clients: [], services: [], invoices: [] };
+    return { format: FORMAT, version: 2, settings: clone(DEFAULT_SETTINGS), clients: [], services: [], invoices: [], estimates: [] };
   }
 
   async open() {
@@ -109,7 +110,7 @@ export class Store {
       a.style ||= "dash";
       a.heading ??= ""; a.title ??= ""; a.lines ||= []; a.currency ??= ""; a.retired = !!a.retired;
     }
-    const out = { format: FORMAT, version: 1, settings: s, clients: [], services: [], invoices: [] };
+    const out = { format: FORMAT, version: 2, settings: s, clients: [], services: [], invoices: [], estimates: [] };
     for (const c of d.clients || []) {
       out.clients.push({ id: +c.id, name: c.name || "", address: c.address || "", email: c.email || "",
         phone: c.phone || "", currency: c.currency || "", account: c.account || "", notes: c.notes || "" });
@@ -128,6 +129,18 @@ export class Store {
           unit: x.unit || "", unit_price: String(x.unit_price ?? "0") })),
         payments: (i.payments || []).map((p, k) => ({ id: +(p.id ?? k + 1), amount: String(p.amount), date: p.date,
           method: p.method || "", note: p.note || "" })),
+      });
+    }
+    for (const e of d.estimates || []) {
+      out.estimates.push({
+        id: +e.id, number: String(e.number || ""), client_id: e.client_id == null ? null : +e.client_id,
+        client: e.client || {}, issue_date: e.issue_date || "", valid_until: e.valid_until || "",
+        currency: e.currency || "GBP", tax_rate: String(e.tax_rate ?? "0"), tax_label: e.tax_label || "VAT",
+        account_id: e.account_id || "", account: e.account || {}, show_account: !!e.show_account,
+        notes: e.notes || "", status: e.status || "draft", invoice_id: e.invoice_id == null ? null : +e.invoice_id,
+        created: e.created || "",
+        items: (e.items || []).map((x) => ({ description: x.description || "", quantity: String(x.quantity ?? "1"),
+          unit: x.unit || "", unit_price: String(x.unit_price ?? "0") })),
       });
     }
     return out;
@@ -184,11 +197,15 @@ export class Store {
     return "";
   }
 
-  // Everything here is replaced by the file (a copy of what was here is kept first).
+  // Everything here is replaced by the file (a copy of what was here is kept
+  // first). An older file with no estimates leaves the estimates here alone.
   async importData(d) {
     await tx(this.db, "backups", "readwrite", (s) => s.put(clone(this.data), "before-import-" +
       new Date().toISOString().slice(0, 16).replace(":", "")));
+    const keep = d && !("estimates" in d) ? clone(this.data.estimates || []) : null;
+    const keepNb = d && !("estimates" in d) ? clone(this.settings.estimate_numbering) : null;
     this.data = Store.normalise(d);
+    if (keep) { this.data.estimates = keep; this.settings.estimate_numbering = keepNb; }
     await this.save();
   }
 
@@ -326,24 +343,29 @@ export class Store {
   }
 
   // ---------------------------------------------------------- numbering
-  formatNumber(n) {
-    const nb = this.settings.numbering;
+  nb(kind = "invoice") {
+    return kind === "estimate" ? (this.settings.estimate_numbering ||= { prefix: "EST-", next: 1, digits: 4 })
+      : this.settings.numbering;
+  }
+
+  formatNumber(n, kind = "invoice") {
+    const nb = this.nb(kind);
     return (nb.prefix || "") + String(n).padStart(Math.max(1, +nb.digits || 1), "0");
   }
 
-  nextNumber() {
-    let n = Math.max(1, +this.settings.numbering.next || 1);
-    while (this.numberTaken(this.formatNumber(n))) n++;
-    return this.formatNumber(n);
+  nextNumber(kind = "invoice") {
+    let n = Math.max(1, +this.nb(kind).next || 1);
+    while (this.numberTaken(this.formatNumber(n, kind), null, kind)) n++;
+    return this.formatNumber(n, kind);
   }
 
-  numberTaken(number, exceptId = null) {
-    const r = this.data.invoices.find((i) => i.number === number);
+  numberTaken(number, exceptId = null, kind = "invoice") {
+    const r = (kind === "estimate" ? this.data.estimates : this.data.invoices).find((i) => i.number === number);
     return !!r && r.id !== exceptId;
   }
 
-  advanceNumbering(number) {
-    const nb = this.settings.numbering;
+  advanceNumbering(number, kind = "invoice") {
+    const nb = this.nb(kind);
     const p = nb.prefix || "";
     const rest = number.slice(p.length);
     if (number.startsWith(p) && /^\d+$/.test(rest)) {
@@ -451,6 +473,118 @@ export class Store {
     const r = this.data.invoices.find((i) => i.id === +iid);
     r.payments = r.payments.filter((p) => p.id !== pid);
     await this.save();
+  }
+
+  // ---------------------------------------------------------- estimates
+  // Like invoices, with a valid-until date instead of a due date, a status
+  // (draft, sent, accepted, declined), and payment details off unless ticked.
+  static EST_STATUSES = [["draft", "Draft"], ["sent", "Sent"], ["accepted", "Accepted"], ["declined", "Declined"]];
+
+  async saveEstimate(est, items) {
+    const c = this.client(est.client_id) || {};
+    const acc = this.account(est.account_id) || {};
+    const row = {
+      number: String(est.number || "").trim(),
+      client_id: est.client_id == null ? null : +est.client_id,
+      client: Object.fromEntries(["name", "address", "email", "phone"].map((k) => [k, c[k] || ""])),
+      issue_date: est.issue_date,
+      valid_until: est.valid_until || "",
+      currency: est.currency || "GBP",
+      tax_rate: M.fmtQty(est.tax_rate || "0"),
+      tax_label: est.tax_label || "VAT",
+      account_id: acc.id || "",
+      account: clone(acc),
+      show_account: !!est.show_account,
+      notes: est.notes || "",
+    };
+    if (this.numberTaken(row.number, est.id || null, "estimate")) throw new Error(`There is already an estimate numbered ${row.number}.`);
+    row.items = items.filter((it) => (it.description || "").trim()).map((it) => ({
+      description: it.description.trim(), quantity: M.fmtQty(it.quantity || "0"), unit: it.unit || "",
+      unit_price: M.fmtQty(it.unit_price || "0") }));
+    let id = est.id;
+    if (id) {
+      Object.assign(this.data.estimates.find((e) => e.id === id), row);
+    } else {
+      id = this.nextIdOf(this.data.estimates);
+      Object.assign(row, { id, created: new Date().toISOString().slice(0, 19), status: est.status || "draft",
+        invoice_id: null });
+      this.data.estimates.push(row);
+    }
+    this.advanceNumbering(row.number, "estimate");
+    await this.save();
+    return id;
+  }
+
+  estimate(eid) {
+    const r = this.data.estimates.find((e) => e.id === +eid);
+    if (!r) return null;
+    const est = clone(r);
+    est.kind = "estimate";
+    est.payments = [];
+    return Object.assign(est, Store.totals(est));
+  }
+
+  estimates() {
+    return this.data.estimates
+      .map((e) => this.estimate(e.id))
+      .sort((a, b) => (b.issue_date || "").localeCompare(a.issue_date || "") || b.number.localeCompare(a.number));
+  }
+
+  static estimateStatus(est, today = M.todayIso()) {
+    const st = est.status || "draft";
+    if ((st === "draft" || st === "sent") && est.valid_until && est.valid_until < today) return "Expired";
+    return (Store.EST_STATUSES.find(([k]) => k === st) || [0, "Draft"])[1];
+  }
+
+  async setEstimateStatus(eid, status) {
+    this.data.estimates.find((e) => e.id === +eid).status = status;
+    await this.save();
+  }
+
+  async deleteEstimate(eid) {
+    this.data.estimates = this.data.estimates.filter((e) => e.id !== +eid);
+    await this.save();
+  }
+
+  async duplicateEstimate(eid, today = M.todayIso()) {
+    const old = this.estimate(eid);
+    const gap = M.daysBetween(old.issue_date, old.valid_until);
+    const acc = this.account(old.account_id);
+    const est = { number: this.nextNumber("estimate"), client_id: old.client_id, issue_date: today,
+      valid_until: old.valid_until && gap != null ? M.addDays(today, gap) : "",
+      currency: old.currency, tax_rate: old.tax_rate, tax_label: old.tax_label,
+      account_id: acc && !acc.retired ? old.account_id : (this.settings.defaults.account || ""),
+      show_account: old.show_account, notes: old.notes };
+    return this.saveEstimate(est, old.items);
+  }
+
+  // The client said yes: an invoice with the same client, lines and prices,
+  // dated today, due after the usual terms.
+  async estimateToInvoice(eid, today = M.todayIso()) {
+    const est = this.estimate(eid);
+    const days = +this.settings.defaults.terms_days || 0;
+    let acc = this.account(est.account_id);
+    if (!acc || acc.retired) acc = this.account(this.settings.defaults.account || "");
+    const iid = await this.saveInvoice({ number: this.nextNumber(), client_id: est.client_id, issue_date: today,
+      due_date: days ? M.addDays(today, days) : "", currency: est.currency, tax_rate: est.tax_rate,
+      tax_label: est.tax_label, account_id: (acc || {}).id || "", notes: this.settings.note || "" }, est.items);
+    const r = this.data.estimates.find((e) => e.id === +eid);
+    r.status = "accepted";
+    r.invoice_id = iid;
+    await this.save();
+    return iid;
+  }
+
+  // Sent and not yet answered (nor expired): how many, and per currency.
+  estimatesWaiting(today = M.todayIso()) {
+    let n = 0;
+    const amounts = {};
+    for (const e of this.estimates()) {
+      if (Store.estimateStatus(e, today) !== "Sent") continue;
+      n++;
+      amounts[e.currency] = (amounts[e.currency] || 0n) + e.total;
+    }
+    return { n, amounts };
   }
 
   pdfName(inv) {

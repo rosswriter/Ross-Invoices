@@ -230,15 +230,20 @@ function paintClassic(pen, inv, s) {
     boxBottom = boxTop + boxH;
   } else boxBottom = top + 12;
 
-  pen.text(right, MARGIN + 18, "INVOICE", font(24, "bold"), C.ACCENT, "right");
+  const est = inv.kind === "estimate";
+  pen.text(right, MARGIN + 18, est ? "ESTIMATE" : "INVOICE", font(24, "bold"), C.ACCENT, "right");
   const f10 = font(9.5);
   let my = MARGIN + 40;
-  for (const m of [`Invoice no.: ${inv.number}`, `Issue date: ${M.longDate(inv.issue_date)}`,
-    `Due date: ${M.longDate(inv.due_date) || "On receipt"}`]) {
+  const meta = est
+    ? [`Estimate no.: ${inv.number}`, `Date: ${M.longDate(inv.issue_date)}`,
+      ...(inv.valid_until ? [`Valid until: ${M.longDate(inv.valid_until)}`] : [])]
+    : [`Invoice no.: ${inv.number}`, `Issue date: ${M.longDate(inv.issue_date)}`,
+      `Due date: ${M.longDate(inv.due_date) || "On receipt"}`];
+  for (const m of meta) {
     pen.text(right, my, m, f10, C.BLACK, "right");
     my += 15;
   }
-  if (inv.show_stamp !== false) {
+  if (inv.show_stamp !== false && !est) {
     const [stamp, col] = stampOf(inv, C.ACCENT);
     pen.text(right, my + 3, stamp, font(10.5, "bold"), col, "right");
     my += 15;
@@ -308,11 +313,11 @@ function paintClassic(pen, inv, s) {
   const barCol = inv.total > 0n && inv.balance <= 0n ? C.GREEN : C.ACCENT;
   pen.rect(barX, barTop, right - barX, 25, barCol);
   const fb = font(10.5, "bold");
-  pen.text(barX + 8, barTop + 16.5, "Balance Due", fb, C.WHITE);
+  pen.text(barX + 8, barTop + 16.5, est ? "Estimate Total" : "Balance Due", fb, C.WHITE);
   pen.text(colAmount, barTop + 16.5, money(inv.balance), fb, C.WHITE, "right");
   y = barTop + 25;
 
-  const block = accountLines(inv.account || {});
+  const block = accountLines(!est || inv.show_account ? (inv.account || {}) : {});
   const thanks = s.thanks || "";
   const note = String(inv.notes || "").trim();
   const fnote = font(8.6, "italic");
@@ -344,7 +349,7 @@ function paintClassic(pen, inv, s) {
 }
 
 function footerClassic(pen, inv, s, n, total) {
-  let txt = `${s.business.name || ""} — Invoice ${inv.number}`;
+  let txt = `${s.business.name || ""} — ${inv.kind === "estimate" ? "Estimate" : "Invoice"} ${inv.number}`;
   if (total > 1) txt += ` — page ${n} of ${total}`;
   pen.text(A4_W / 2, A4_H - 22, txt, font(7.5), C.MID, "centre");
 }
@@ -358,7 +363,9 @@ function paintCircles(pen, inv, s) {
 
   const d = 58, gap = 10, top = 42;
   const fc = font(28);
-  [["I", C.GREY], ["N", C.ORANGE], ["V", C.GREY]].forEach(([ch, col], i) => {
+  const est = inv.kind === "estimate";
+  const L = est ? "EST" : "INV";
+  [[L[0], C.GREY], [L[1], C.ORANGE], [L[2], C.GREY]].forEach(([ch, col], i) => {
     const x = Mg + i * (d + gap);
     pen.ellipse(x, top, d, d, col);
     pen.text(x + d / 2, top + d / 2 + fc.size * CAP / 2, ch, fc, C.WHITE, "centre");
@@ -378,13 +385,17 @@ function paintCircles(pen, inv, s) {
 
   const lx = right - 165;
   let my = top + d + 12;
-  for (const [a, v] of [["Invoice #", inv.number], ["Date", M.longDate(inv.issue_date)],
-    ["Due", M.longDate(inv.due_date) || "On receipt"]]) {
+  const meta = est
+    ? [["Estimate #", inv.number], ["Date", M.longDate(inv.issue_date)],
+      ...(inv.valid_until ? [["Valid until", M.longDate(inv.valid_until)]] : [])]
+    : [["Invoice #", inv.number], ["Date", M.longDate(inv.issue_date)],
+      ["Due", M.longDate(inv.due_date) || "On receipt"]];
+  for (const [a, v] of meta) {
     pen.text(lx + 50, my, a, fb, C.INK, "right");
     pen.text(right - 6, my, v, f8, C.INK, "right");
     my += 13;
   }
-  if (inv.show_stamp !== false) {
+  if (inv.show_stamp !== false && !est) {
     const [stamp, col] = stampOf(inv, C.ORANGE);
     pen.text(right - 6, my + 2, stamp, font(9, "bold"), col, "right");
     my += 15;
@@ -456,11 +467,11 @@ function paintCircles(pen, inv, s) {
   const barTop = ty, barX = colQty - 50;
   const barCol = inv.total > 0n && inv.balance <= 0n ? C.GREEN : C.INK;
   pen.rect(barX, barTop, right - barX, 24, barCol);
-  pen.text(barX + 10, barTop + 16, "Balance Due", font(11), C.WHITE);
+  pen.text(barX + 10, barTop + 16, est ? "Estimate Total" : "Balance Due", font(11), C.WHITE);
   pen.text(colAmount, barTop + 16, money(inv.balance), font(11, "semibold"), C.WHITE, "right");
   y = barTop + 24;
 
-  const block = accountLines(inv.account || {});
+  const block = accountLines(!est || inv.show_account ? (inv.account || {}) : {});
   if (block.length && block[0][0] !== "heading") block.unshift(["heading", "Payment info"]);
   const thanks = s.thanks || "";
   const H = { heading: 20, title: 13, gap: 9, colon: 12, dash: 12, plain: 12 };
@@ -523,7 +534,7 @@ export async function makePdf(inv, s) {
   doc.registerFontkit(window.fontkit);
   const emb = {};
   for (const [k, f] of Object.entries(FONTS)) emb[k] = await doc.embedFont(f.bytes, { subset: true });
-  doc.setTitle(`Invoice ${inv.number}`);
+  doc.setTitle(`${inv.kind === "estimate" ? "Estimate" : "Invoice"} ${inv.number}`);
   doc.setAuthor(s.business.name || "");
   doc.setCreator("Ross Invoices");
   doc.setProducer("Ross Invoices (web)");

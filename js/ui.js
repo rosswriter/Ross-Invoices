@@ -4,8 +4,9 @@ import { Store, blankAccount } from "./store.js";
 import * as P from "./pdf.js";
 import * as F from "./files.js";
 
-export const VERSION = "1.0.0";
+export const VERSION = "1.1.0";
 const TERMS = [["On receipt", 0], ["7 days", 7], ["14 days", 14], ["30 days", 30], ["60 days", 60]];
+const EST_TERMS = [["No end date", 0], ["14 days", 14], ["30 days", 30], ["60 days", 60], ["90 days", 90]];
 const METHODS = ["Bank transfer", "Cash", "Cheque", "PayPal", "Card", "Other"];
 const UNITS = ["hours", "days", "sessions", "words", "pages", "chapters", "items"];
 const GROUPS = ["Teaching", "Editing", "Mentoring", "Readings and talks", "Writing", "Expenses"];
@@ -14,11 +15,15 @@ const PILLS = {
   "Overdue": ["Overdue", "#b3261e", "#ffffff"], "Part paid": ["Partial", "#fff3d4", "#8a5a00"],
   "Part paid, overdue": ["Partial, overdue", "#b3261e", "#ffffff"],
   "Nothing to pay": ["Nothing due", "#eceff3", "#6b7480"],
+  // estimates
+  "Draft": ["Draft", "#eceff3", "#6b7480"], "Sent": ["Sent", "#e3ecf7", "#1f3b57"],
+  "Accepted": ["Accepted", "#e3f3e7", "#1e7a34"], "Declined": ["Declined", "#fde8e7", "#b3261e"],
+  "Expired": ["Expired", "#f6ead8", "#7a4b00"],
 };
 const RECENT = 10;
 
 let st = null;
-const state = { page: "Dashboard", filter: 0, search: "", period: "all", year: null };
+const state = { page: "Dashboard", filter: 0, search: "", period: "all", year: null, efilter: 0 };
 
 // ------------------------------------------------------------------ little helpers
 export function h(tag, props = {}, ...kids) {
@@ -168,6 +173,7 @@ function actions(title, items) {
 // ------------------------------------------------------------------ the frame
 const PAGES = [
   ["Dashboard", "Overview", "◫"], ["Invoices", "Everything you have invoiced", "▤"],
+  ["Estimates", "Prices you have quoted", "◇"],
   ["Clients", "Who you work for", "☺"], ["Services", "What you charge for", "✎"],
   ["Payment Accounts", "Where you are paid", "£"], ["Settings", "Your details and choices", "⚙"],
 ];
@@ -202,7 +208,7 @@ export function render() {
   const main = $("#main");
   main.replaceChildren(h("div", { class: "page-head" }, h("h1", {}, name), h("p", { class: "sub" }, sub)));
   $("#toptitle").textContent = name;
-  ({ Dashboard: pageDashboard, Invoices: pageInvoices, Clients: pageClients, Services: pageServices,
+  ({ Dashboard: pageDashboard, Invoices: pageInvoices, Estimates: pageEstimates, Clients: pageClients, Services: pageServices,
     "Payment Accounts": pageAccounts, Settings: pageSettings })[name](main);
 }
 
@@ -229,6 +235,13 @@ function pageDashboard(main) {
     h("label", { class: "inline" }, "Showing: ", select(periods, state.period, (e) => { state.period = e.target.value; render(); })),
     h("span", { class: "grow" }),
     h("button", { class: "primary big", type: "button", onclick: () => newInvoice() }, "+  New Invoice")));
+  const wait = st.estimatesWaiting();
+  if (wait.n) {
+    main.append(h("div", { class: "foot-row est-wait" }, h("button", { class: "link", type: "button",
+      onclick: () => { state.efilter = 1; go("Estimates"); } },
+    `${wait.n} estimate${wait.n === 1 ? "" : "s"} awaiting an answer (` +
+      Object.entries(wait.amounts).sort().map(([c, v]) => M.fmt(v, c)).join(", ") + ") →")));
+  }
   const span = year != null ? M.taxYearSpan(year) : null;
   const rows = st.invoices().filter((i) => !span || (i.issue_date >= span[0] && i.issue_date <= span[1])).slice(0, RECENT);
   main.append(invoiceTable(rows, true));
@@ -362,11 +375,13 @@ async function pdfBytes(inv) {
 }
 
 async function savePdf(inv, quiet = false) {
+  const est = inv.kind === "estimate";
   try {
     const bytes = await pdfBytes(inv);
-    const where = await F.savePdf(st, bytes, st.pdfName(inv), M.toDate(inv.issue_date)?.getFullYear());
+    const where = await F.savePdf(st, bytes, st.pdfName(inv), M.toDate(inv.issue_date)?.getFullYear(),
+      est ? "Estimates" : "");
     const saved = (await st.kvGet("pdfSaved")) || {};
-    saved[inv.id] = M.todayIso();
+    saved[(est ? "e" : "") + inv.id] = M.todayIso();
     await st.kvSet("pdfSaved", saved);
     if (!quiet) toast(where, 7000);
     return bytes;
@@ -380,6 +395,13 @@ async function savePdf(inv, quiet = false) {
 function emailText(inv) {
   const name = st.settings.business.name || "";
   const cur = inv.currency;
+  if (inv.kind === "estimate") {
+    return [`Estimate ${inv.number} from ${name}`, [`Dear ${inv.client.name || ""},`, "",
+      `Please find attached my estimate ${inv.number} for ${M.fmt(inv.total, cur)}` +
+      (inv.valid_until ? `, valid until ${M.longDate(inv.valid_until)}` : "") + ".", "",
+      "Do let me know if you would like to go ahead, or if you have any questions.", "",
+      "With best wishes,", name].join("\n")];
+  }
   const subject = `Invoice ${inv.number} from ${name}`;
   const body = [`Dear ${inv.client.name || ""},`, "",
     `Please find attached invoice ${inv.number} for ${M.fmt(inv.paid !== 0n ? inv.balance : inv.total, cur)}` +
@@ -388,17 +410,26 @@ function emailText(inv) {
   return [subject, body];
 }
 
+// An estimate still a draft becomes Sent once it has gone.
 async function sendInvoice(inv) {
   const [subject, body] = emailText(inv);
   const bytes = await pdfBytes(inv);
+  const sent = async () => {
+    if (inv.kind === "estimate" && (inv.status || "draft") === "draft") {
+      await st.setEstimateStatus(inv.id, "sent");
+      render();
+    }
+  };
   if (F.canShareFiles()) {
     try {
       await F.sharePdf(bytes, st.pdfName(inv), subject, body);
+      await sent();
       return;
     } catch (e) {
       if (e && e.name === "AbortError") return;
     }
   }
+  await sent();
   F.download(bytes, st.pdfName(inv), "application/pdf");
   location.href = `mailto:${encodeURIComponent(inv.client.email || "")}?subject=${encodeURIComponent(subject)}` +
     `&body=${encodeURIComponent(body)}`;
@@ -406,7 +437,8 @@ async function sendInvoice(inv) {
 }
 
 async function preview(inv) {
-  const box = h("div", { class: "preview" }, h("p", { class: "muted" }, "Drawing the invoice…"));
+  const box = h("div", { class: "preview" }, h("p", { class: "muted" },
+    `Drawing the ${inv.kind === "estimate" ? "estimate" : "invoice"}…`));
   const p = sheet(`Preview — ${inv.number}`, box, [{ label: "Close", value: null }], { wide: true, tall: true, nofocus: true });
   const canvases = await P.renderPages(inv, st.settings, 2);
   box.replaceChildren(...canvases.map((c) => h("div", { class: "page" }, c)));
@@ -475,9 +507,23 @@ async function newInvoice() {
   return editInvoice(null);
 }
 
-async function editInvoice(inv) {
+async function newEstimate() {
+  if (!st.data.clients.length) {
+    if (!(await confirmBox("You have no clients yet. Add one now?", "Add a Client"))) return;
+    const c = await editClient(null);
+    if (!c) return;
+  }
+  return editInvoice(null, "estimate");
+}
+
+// The same window makes invoices and estimates. An estimate has "Valid for"
+// instead of payment terms, and prints the payment details only if ticked.
+async function editInvoice(inv, kind = inv && inv.kind === "estimate" ? "estimate" : "invoice") {
   const s = st.settings, d = s.defaults;
-  const number = h("input", { type: "text", value: inv ? inv.number : st.nextNumber() });
+  const est = kind === "estimate";
+  const word = est ? "estimate" : "invoice", Word = est ? "Estimate" : "Invoice";
+  const T = est ? EST_TERMS : TERMS;
+  const number = h("input", { type: "text", value: inv ? inv.number : st.nextNumber(kind) });
   let clientSel;
   const clientWrap = h("div", { class: "with-btn" });
   const fillClients = (sel) => {
@@ -491,18 +537,18 @@ async function editInvoice(inv) {
   fillClients(inv ? inv.client_id : "");
   const issue = h("input", { type: "date", value: inv ? inv.issue_date : M.todayIso() });
   const due = h("input", { type: "date" });
-  const terms = select([...TERMS.map(([l, n]) => [n, l]), [-1, "Choose a date"]], "");
+  const terms = select([...T.map(([l, n]) => [n, l]), [-1, "Choose a date"]], "");
   const setDue = (iso) => {
     due.value = iso || "";
     const n = iso ? M.daysBetween(issue.value, iso) : 0;
-    const known = TERMS.find((t) => t[1] === n);
+    const known = T.find((t) => t[1] === n);
     terms.value = String(!iso ? 0 : known ? known[1] : -1);
     due.disabled = terms.value === "0";
     if (due._say) due._say();
   };
-  if (inv) setDue(inv.due_date);
+  if (inv) setDue(est ? inv.valid_until : inv.due_date);
   else {
-    const n = +d.terms_days || 0;
+    const n = +(est ? d.valid_days ?? 30 : d.terms_days) || 0;
     setDue(n ? M.addDays(issue.value, n) : "");
   }
   terms.onchange = () => {
@@ -530,8 +576,10 @@ async function editInvoice(inv) {
   const tax = h("input", { type: "text", inputmode: "decimal", class: "narrow",
     value: M.fmtQty(inv ? inv.tax_rate : d.tax_rate || "0"), oninput: () => recalc() });
   const taxLabel = h("input", { type: "text", class: "narrow", value: inv ? inv.tax_label : d.tax_label || "VAT" });
-  const notes = h("textarea", { rows: 2, placeholder: "A note at the foot of the invoice (optional)" });
-  notes.value = inv ? inv.notes : s.note || "";
+  const notes = h("textarea", { rows: 2, placeholder: `A note at the foot of the ${word} (optional)` });
+  notes.value = inv ? inv.notes : est ? "" : s.note || "";
+  const showAcc = h("input", { type: "checkbox", checked: inv ? !!inv.show_account : false });
+  const showAccRow = est ? h("label", { class: "check" }, showAcc, " Print the payment details on the estimate") : null;
 
   function clientChanged() {
     const c = st.client(clientSel.value);
@@ -602,10 +650,14 @@ async function editInvoice(inv) {
     const c = st.client(clientSel.value) || {};
     const out = { number: number.value.trim(), client_id: clientSel.value ? +clientSel.value : null,
       client: Object.fromEntries(["name", "address", "email", "phone"].map((k) => [k, c[k] || ""])),
-      issue_date: issue.value || M.todayIso(), due_date: terms.value === "0" ? "" : due.value,
+      issue_date: issue.value || M.todayIso(),
       currency: currency.value, tax_rate: M.parseAmount(tax.value), tax_label: taxLabel.value.trim() || "Tax",
       account_id: accountSel.value || "", account: st.account(accountSel.value) || {}, notes: notes.value.trim(),
-      items: current(), payments: inv ? inv.payments : [] };
+      items: current(), payments: inv && !est ? inv.payments : [] };
+    const end = terms.value === "0" ? "" : due.value;
+    if (est) Object.assign(out, { kind: "estimate", valid_until: end, show_account: showAcc.checked,
+      status: inv ? inv.status : "draft" });
+    else out.due_date = end;
     return Object.assign(out, Store.totals(out));
   }
   function recalc() {
@@ -648,9 +700,10 @@ async function editInvoice(inv) {
 
   const body = h("div", { class: "editor" },
     h("div", { class: "grid2" },
-      field("Invoice number", number), field("Client", clientWrap),
-      field("Issue date", dated(issue)), field("Due", h("div", { class: "with-btn top" }, terms, dated(due))),
-      field("Currency", currency), field("Pay into", h("div", {}, accWrap, accText)),
+      field(`${Word} number`, number), field("Client", clientWrap),
+      field(est ? "Date" : "Issue date", dated(issue)),
+      field(est ? "Valid for" : "Due", h("div", { class: "with-btn top" }, terms, dated(due))),
+      field("Currency", currency), field(est ? "Payment details" : "Pay into", h("div", {}, accWrap, accText, showAccRow)),
       field("Tax", h("div", { class: "with-btn" }, tax, h("span", {}, "%"), taxLabel))),
     h("h3", { class: "sec" }, "Lines"),
     linesBox,
@@ -658,16 +711,16 @@ async function editInvoice(inv) {
       h("button", { type: "button", onclick: pickService }, "+ Add Service"),
       h("button", { type: "button", onclick: () => { addLine({ quantity: "1" }).desc.focus(); recalc(); } }, "+ Add Line"),
       h("span", { class: "grow" }), totals),
-    field("Note on the invoice", notes),
+    field(`Note on the ${word}`, notes),
     datalist("units", UNITS));
   accountChanged(false);
   recalc();
 
   async function check() {
     const t = draft();
-    if (!t.number) { await infoBox("The invoice needs a number."); return null; }
-    if (!t.client_id) { await infoBox("Please choose who the invoice is for."); return null; }
-    if (!t.items.length) { await infoBox("The invoice has no lines yet."); return null; }
+    if (!t.number) { await infoBox(`The ${word} needs a number.`); return null; }
+    if (!t.client_id) { await infoBox(`Please choose who the ${word} is for.`); return null; }
+    if (!t.items.length) { await infoBox(`The ${word} has no lines yet.`); return null; }
     return t;
   }
   async function save() {
@@ -675,13 +728,13 @@ async function editInvoice(inv) {
     if (!t) return null;
     if (inv) t.id = inv.id;
     try {
-      return await st.saveInvoice(t, t.items);
+      return await (est ? st.saveEstimate(t, t.items) : st.saveInvoice(t, t.items));
     } catch (e) {
       await infoBox(e.message);
       return null;
     }
   }
-  const v = await sheet(inv ? `Invoice ${inv.number}` : "New Invoice", body, [
+  const v = await sheet(inv ? `${Word} ${inv.number}` : `New ${Word}`, body, [
     { label: "Cancel", value: null },
     { label: "Preview", run: async () => { const t = draft(); await preview(t); return false; } },
     { label: "Save", cls: "", run: async () => { const id = await save(); return id ? { id, pdf: false } : false; } },
@@ -689,9 +742,113 @@ async function editInvoice(inv) {
   ], { wide: true, tall: true, modal: true });
   if (!v) return;
   render();
-  const saved = st.invoice(v.id);
+  const saved = est ? st.estimate(v.id) : st.invoice(v.id);
   if (v.pdf) await savePdf(saved);
-  else toast(`Invoice ${saved.number} saved.`);
+  else toast(`${Word} ${saved.number} saved.`);
+}
+
+// ------------------------------------------------------------------ Estimates
+function estimateTable(list) {
+  const today = M.todayIso();
+  if (!list.length) return h("div", { class: "empty" }, st.data.estimates.length ? "No estimates here." :
+    "No estimates yet. An estimate tells a client what the work will cost; when they say yes, turn it into an invoice.");
+  const numbers = Object.fromEntries(st.data.invoices.map((i) => [i.id, i.number]));
+  const t = h("div", { class: "tbl est" },
+    h("div", { class: "tr th" }, h("span", { class: "c-num" }, "Number"), h("span", { class: "c-client" }, "Client"),
+      h("span", { class: "c-date" }, "Date"), h("span", { class: "c-date c-due" }, "Valid until"),
+      h("span", { class: "c-amt" }, "Total"), h("span", { class: "c-num c-paid" }, "Invoice"),
+      h("span", { class: "c-st" }, "Status")));
+  for (const e of list) {
+    t.append(h("button", { class: "tr", type: "button", onclick: () => estimateMenu(e.id) },
+      h("span", { class: "c-num" }, h("b", {}, e.number)),
+      h("span", { class: "c-client" }, (e.client || {}).name || ""),
+      h("span", { class: "c-date" }, M.shortDate(e.issue_date)),
+      h("span", { class: "c-date c-due" }, M.shortDate(e.valid_until) || "—"),
+      h("span", { class: "c-amt strong" }, M.fmt(e.total, e.currency)),
+      h("span", { class: "c-num c-paid" }, numbers[e.invoice_id] || ""),
+      h("span", { class: "c-st" }, pill(Store.estimateStatus(e, today)))));
+  }
+  return t;
+}
+
+function pageEstimates(main) {
+  main.append(h("div", { class: "bar" },
+    h("button", { class: "primary", type: "button", onclick: () => newEstimate() }, "+  New Estimate"),
+    select([[0, "All estimates"], [1, "Awaiting an answer"], [2, "Accepted"], [3, "Declined or expired"]], state.efilter,
+      (e) => { state.efilter = +e.target.value; fill(); })));
+  const holder = h("div");
+  main.append(holder);
+  function fill() {
+    const today = M.todayIso();
+    const list = st.estimates().filter((e) => {
+      const s = Store.estimateStatus(e, today);
+      if (state.efilter === 1) return s === "Draft" || s === "Sent";
+      if (state.efilter === 2) return s === "Accepted";
+      if (state.efilter === 3) return s === "Declined" || s === "Expired";
+      return true;
+    });
+    holder.replaceChildren(estimateTable(list));
+  }
+  fill();
+}
+
+async function estimateMenu(eid) {
+  const e = st.estimate(eid);
+  if (!e) return;
+  const status = Store.estimateStatus(e);
+  const share = F.canShareFiles();
+  const inv = e.invoice_id ? st.invoice(e.invoice_id) : null;
+  const v = await actions(`${e.number} · ${e.client.name || ""} · ${status}`, [
+    { icon: "✎", label: "Change", value: "edit" },
+    { icon: "⧉", label: "Duplicate", sub: "A new estimate like this one, dated today", value: "dup" },
+    inv ? { icon: "▤", label: `Open Invoice ${inv.number}`, sub: "Already turned into an invoice", value: "open" }
+      : { icon: "✓", label: "Turn into Invoice", sub: "The client said yes: an invoice with the same lines", value: "inv" },
+    null,
+    { icon: "◳", label: "Preview", value: "preview" },
+    { icon: "⤓", label: "Save PDF", sub: F.canPickFolder ? "Into your Estimates folder" : "To Downloads", value: "pdf" },
+    { icon: "✉", label: share ? "Send…" : "Send by Email", sub: share ? "Share the PDF: Gmail, WhatsApp…" :
+      "Downloads the PDF and opens an email", value: "send" },
+    null,
+    ...Store.EST_STATUSES.map(([k, label]) => ({ icon: (e.status || "draft") === k ? "●" : "○", label: `Mark as ${label}`,
+      value: "st:" + k, disabled: (e.status || "draft") === k })),
+    null,
+    { icon: "✕", label: "Delete Estimate…", value: "delete", danger: true },
+  ]);
+  if (v === "edit") await editInvoice(e, "estimate");
+  else if (v === "dup") {
+    const id = await st.duplicateEstimate(eid);
+    toast(`Made ${st.estimate(id).number}, dated today.`);
+    render();
+    await editInvoice(st.estimate(id), "estimate");
+  } else if (v === "inv") await turnIntoInvoice(e);
+  else if (v === "open") { go("Invoices"); await invoiceMenu(inv.id); }
+  else if (v === "preview") await preview(e);
+  else if (v === "pdf") await savePdf(e);
+  else if (v === "send") await sendInvoice(e);
+  else if (v && v.startsWith("st:")) {
+    await st.setEstimateStatus(eid, v.slice(3));
+    render();
+  } else if (v === "delete") {
+    let msg = `Delete estimate ${e.number} for ${e.client.name || ""}?`;
+    if (inv) msg += `\n\nInvoice ${inv.number}, made from it, stays.`;
+    msg += "\n\nAny PDF already saved stays where it is.";
+    if (await confirmBox(msg, "Delete", "Keep it", true)) {
+      await st.deleteEstimate(eid);
+      toast(`Estimate ${e.number} deleted.`);
+      render();
+    }
+  }
+}
+
+async function turnIntoInvoice(e) {
+  if (!(await confirmBox(`Turn ${e.number} into an invoice?\n\nThe invoice gets the next invoice number, today's date ` +
+    `and your usual payment terms, with the same client, lines and prices. ${e.number} is marked Accepted.`,
+  "Make the Invoice"))) return;
+  const iid = await st.estimateToInvoice(e.id);
+  const inv = st.invoice(iid);
+  go("Invoices");
+  toast(`${e.number} accepted: invoice ${inv.number} made from it. Check it, then save the PDF.`, 9000);
+  await editInvoice(inv);
 }
 
 // ------------------------------------------------------------------ Clients
@@ -966,12 +1123,25 @@ async function pageSettings(main) {
   const thanks = inp(s.thanks || "");
   const note = inp(s.note || "");
   const style = select(P.STYLES, s.style || "classic");
+  const en = st.nb("estimate");
+  const eprefix = inp(en.prefix), enext = inp(st.nextNumber("estimate").slice((en.prefix || "").length).replace(/^0+/, "") || 1,
+    "number", { min: 1 });
+  const valid = inp(d.valid_days ?? 30, "number", { min: 0, max: 365 });
+  const esample = h("span", { class: "muted" });
+  const showESample = () => {
+    esample.textContent = "Next: " + (eprefix.value || "") + String(Math.max(1, +enext.value || 1))
+      .padStart(Math.max(1, +digits.value || 1), "0");
+  };
+  [eprefix, enext, digits].forEach((x) => x.addEventListener("input", showESample));
+  showESample();
 
   const saveBtn = h("button", { class: "primary", type: "button", onclick: async () => {
     Object.assign(b, { name: name.value.trim(), address: address.value.trim(), email: email.value.trim(),
       phone: phone.value.trim(), website: web.value.trim() });
     Object.assign(nb, { prefix: prefix.value, next: Math.max(1, +next.value || 1), digits: Math.min(8, Math.max(1, +digits.value || 4)) });
-    Object.assign(d, { currency: currency.value, terms_days: Math.max(0, +terms.value || 0), tax_rate: M.parseAmount(tax.value),
+    Object.assign(en, { prefix: eprefix.value, next: Math.max(1, +enext.value || 1), digits: nb.digits });
+    Object.assign(d, { currency: currency.value, terms_days: Math.max(0, +terms.value || 0),
+      valid_days: Math.max(0, +valid.value || 0), tax_rate: M.parseAmount(tax.value),
       tax_label: taxLabel.value.trim() || "VAT" });
     s.thanks = thanks.value.trim();
     s.note = note.value.trim();
@@ -996,6 +1166,10 @@ async function pageSettings(main) {
       field("Payment due in (days; 0 = on receipt)", terms), h("div", { class: "grid2" }, field("Tax rate (%)", tax),
         field("Tax called", taxLabel)), field("Under the bank details", thanks), field("Note at the foot", note),
       field("Invoice style", style)),
+      box("New estimates", field("Number starts with", eprefix), field("Next number", enext), esample,
+        field("Valid for (days; 0 = no end date)", valid),
+        h("p", { class: "muted" }, "Estimates use the same style, currency and tax as invoices. " +
+          "Payment details are printed only if you tick the box on the estimate.")),
       h("div", { class: "bar" }, h("span", { class: "grow" }), saveBtn),
       box("About", h("p", {}, `Ross Invoices for the web, version ${VERSION}.`),
         h("p", { class: "muted" }, "Works without a connection once installed. Nothing you enter leaves this device unless you export, save or share it.")))));
@@ -1016,7 +1190,7 @@ async function pageSettings(main) {
 
   // data
   const persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : false;
-  const counts = `${st.data.clients.length} clients, ${st.data.services.length} services, ${st.settings.accounts.length} accounts, ${st.data.invoices.length} invoices`;
+  const counts = `${st.data.clients.length} clients, ${st.data.services.length} services, ${st.settings.accounts.length} accounts, ${st.data.invoices.length} invoices, ${st.data.estimates.length} estimates`;
   const backups = await st.backups();
   dataInfo.append(
     h("p", {}, "Kept on this device, in this browser: ", h("b", {}, counts), "."),
@@ -1059,7 +1233,8 @@ async function importAll() {
   const when = d.exported ? ` (exported ${M.longDate(d.exported)} ${d.exported.slice(11, 16)})` : "";
   const ok = await confirmBox(`Replace everything here with the file from ${from}${when}?\n\n` +
     `It has ${n.clients.length} clients, ${n.services.length} services, ${n.settings.accounts.length} payment accounts and ` +
-    `${n.invoices.length} invoices.\n\nWhat's here now (${st.data.invoices.length} invoices) is kept as a copy first, under Settings → Daily copies.`,
+    `${n.invoices.length} invoices` + ("estimates" in d ? `, and ${n.estimates.length} estimates.` :
+      ".\n\n(It has no estimates, so the estimates here stay as they are.)") + `\n\nWhat's here now (${st.data.invoices.length} invoices) is kept as a copy first, under Settings → Daily copies.`,
   "Replace", "Cancel", true);
   if (!ok) return;
   await st.importData(d);
@@ -1086,5 +1261,5 @@ export async function start(store) {
 }
 
 // for the tests
-export const _test = { editInvoice, invoiceMenu, recordPayment, savePdf, sendInvoice, preview, editClient, editService,
+export const _test = { editInvoice, invoiceMenu, estimateMenu, turnIntoInvoice, newEstimate, recordPayment, savePdf, sendInvoice, preview, editClient, editService,
   editAccount, importAll, exportAll, emailText, state };

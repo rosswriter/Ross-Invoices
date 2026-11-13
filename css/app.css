@@ -224,3 +224,13 @@ h3.sec { margin: 10px 0 10px; color: var(--navy); font-size: 16px; }
   .tbl.inv .c-amt.strong, .tbl.inv .tr.th .c-amt:last-of-type { display: block; }
   .grid2 { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------- estimates (1.1.0) */
+label.check { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 15px; cursor: pointer; }
+label.check input { width: 20px; height: 20px; margin: 0; flex: none; }
+.est-wait { justify-content: flex-start; margin: -6px 0 14px; }
+.est-wait .link { font-weight: 600; }
+@media (max-width: 760px) {
+  .tbl.est .c-date { display: none; }
+  .c-num { width: 90px; }
+}

@@ -37,17 +37,19 @@ async function allowed(h) {
 
 // Save bytes as name: into the chosen folder (in a year folder) if there is
 // one, or as a download. Returns where it went, in words.
-export async function savePdf(store, bytes, name, year) {
+// sub: a folder inside the chosen one first ("Estimates"), then the year.
+export async function savePdf(store, bytes, name, year, sub = "") {
   const h = await folderHandle(store);
   if (h) {
     try {
       if (await allowed(h)) {
-        const dir = year ? await h.getDirectoryHandle(String(year), { create: true }) : h;
+        let dir = sub ? await h.getDirectoryHandle(sub, { create: true }) : h;
+        if (year) dir = await dir.getDirectoryHandle(String(year), { create: true });
         const fh = await dir.getFileHandle(name, { create: true });
         const w = await fh.createWritable();
         await w.write(new Blob([bytes], { type: "application/pdf" }));
         await w.close();
-        return `Saved in ${h.name}${year ? "/" + year : ""}: ${name}`;
+        return `Saved in ${h.name}${sub ? "/" + sub : ""}${year ? "/" + year : ""}: ${name}`;
       }
     } catch (e) {
       if (e && e.name === "AbortError") throw e;
