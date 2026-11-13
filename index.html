@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ross Invoices</title>
+<meta name="description" content="Invoices for freelance work: clients, services, payment accounts, PDFs. Kept on this device; works offline.">
+<meta name="theme-color" content="#1f3b57">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Invoices">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div id="wordmark"></div>
+    <div class="side-rule"></div>
+    <nav id="nav"></nav>
+    <div id="side-note">Kept on this device<br>Works offline</div>
+  </aside>
+  <div id="scrim"></div>
+  <div id="content">
+    <header id="top">
+      <button id="menu" type="button" aria-label="Menu">☰</button>
+      <span id="toptitle"></span>
+      <span id="topname"></span>
+    </header>
+    <main id="main"><p class="loading">Opening…</p></main>
+  </div>
+</div>
+<div id="sheets"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="vendor/pdf-lib.min.js"></script>
+<script src="vendor/fontkit.umd.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
