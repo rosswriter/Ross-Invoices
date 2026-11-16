@@ -13,6 +13,15 @@
 </head>
 <body>
 <div id="app">
+  <nav id="menubar" aria-label="Menus">
+    <button data-menu="file"><u>F</u>ile</button>
+    <button data-menu="edit"><u>E</u>dit</button>
+    <button data-menu="insert"><u>I</u>nsert</button>
+    <button data-menu="format">F<u>o</u>rmat</button>
+    <button data-menu="notes"><u>N</u>otes</button>
+    <button data-menu="view"><u>V</u>iew</button>
+    <button data-menu="help"><u>H</u>elp</button>
+  </nav>
   <header id="toolbar" role="toolbar" aria-label="Formatting">
     <button id="b-list" class="tb" title="Show or hide the note list (Ctrl+Shift+L)" aria-label="Note list">☰</button>
     <button id="b-new" class="tb" title="New note">New</button>
@@ -40,8 +49,10 @@
     <span class="sep"></span>
     <button data-cmd="smaller" class="tb" title="Smaller text (Ctrl+−)">A−</button>
     <button data-cmd="bigger" class="tb" title="Larger text (Ctrl+=)">A+</button>
+    <button data-cmd="splith" class="tb" title="Split side by side (Ctrl+\)">Split ⇆</button>
+    <button data-cmd="splitv" class="tb" title="Split top and bottom (Ctrl+Shift+\)">Split ⇅</button>
     <button data-cmd="dark" class="tb" title="Light / dark (Ctrl+Shift+D)" aria-label="Light or dark">☾</button>
-    <button id="b-more" class="tb" title="More" aria-label="More">⋯</button>
+    <button data-cmd="print" class="tb" title="Print or save as PDF (Ctrl+P)">Print</button>
   </header>
   <div id="main">
     <aside id="side">
@@ -61,14 +72,22 @@
       <div id="count"></div>
     </aside>
     <div id="divider" title="Drag to make the list wider or narrower"></div>
-    <section id="pane">
-      <div id="head"></div>
-      <div id="scroller"><div id="page" contenteditable="true" spellcheck="true" autocapitalize="sentences"></div></div>
-    </section>
+    <div id="panes">
+      <section class="pane active" id="pane0">
+        <div class="head"></div>
+        <div class="scroller"><div id="page" class="page" contenteditable="true" spellcheck="true" autocapitalize="sentences"></div></div>
+      </section>
+      <div id="pdiv" title="Drag to change the sizes" hidden></div>
+      <section class="pane" id="pane1" hidden>
+        <div class="head"></div>
+        <div class="scroller"><div id="page2" class="page" contenteditable="true" spellcheck="true" autocapitalize="sentences"></div></div>
+      </section>
+    </div>
   </div>
   <div id="chip" hidden></div>
   <div id="menu" hidden></div>
   <div id="toast" hidden></div>
+  <div id="dialog" hidden><div class="box"><h2></h2><div class="body"></div><button class="big main" id="dialog-close">Close</button></div></div>
 </div>
 <div id="start" hidden>
   <div class="card">
@@ -80,6 +99,8 @@
   </div>
 </div>
 <input id="file-pic" type="file" accept="image/*" multiple hidden>
+<input id="file-docx" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+<div id="printdoc" class="page"></div>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

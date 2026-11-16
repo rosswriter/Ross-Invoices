@@ -2,10 +2,10 @@
 // A new version (a new CACHE name) is fetched in the background and used the
 // next time the app is opened. (The notes themselves are in your folder, not here.)
 const PREFIX = "ross-note-";
-const CACHE = PREFIX + "1.0.0";
+const CACHE = PREFIX + "1.3.0";
 const FILES = [
   "./", "index.html", "manifest.webmanifest", "css/app.css",
-  "js/app.js", "js/md.js", "js/editor.js", "js/store.js",
+  "js/app.js", "js/md.js", "js/editor.js", "js/store.js", "js/wordio.js",
   "fonts/Caladea-Regular.woff2", "fonts/Caladea-Bold.woff2", "fonts/Caladea-Italic.woff2", "fonts/Caladea-BoldItalic.woff2",
   "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png", "icons/apple-touch-icon.png",
 ];

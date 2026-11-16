@@ -419,3 +419,27 @@ export function longDate(withTime = false) {
   if (withTime) s += ", " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
   return s;
 }
+
+// a note's Markdown with its title (its first line with words) made a heading (the laptop's notesio.title_as_heading)
+const MARKER = /^(#{1,6}\s+|\s*[-*+]\s+|\s*\d+[.)]\s+|>\s?)/;
+export function titleAsHeading(text, level) {
+  const lines = text.split("\n");
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k];
+    if (line.trim()) {
+      const body = line.trimStart().startsWith("|") ? line.trim() : line.replace(MARKER, "").trim();
+      lines[k] = "#".repeat(Math.max(1, Math.min(6, level))) + " " + body;
+      // the note's own headings go down with it (not inside code)
+      let fence = null;
+      for (let j = k + 1; j < lines.length; j++) {
+        const f = FENCE_RE.exec(lines[j]);
+        if (fence) { if (f && f[1] === fence) fence = null; continue; }
+        if (f) { fence = f[1]; continue; }
+        const h = /^(#{1,6})\s/.exec(lines[j]);
+        if (h && level > 1) lines[j] = "#".repeat(Math.min(6, h[1].length + level - 1)) + lines[j].slice(h[1].length);
+      }
+      return lines.slice(k).join("\n").replace(/\n+$/, "") + "\n";
+    }
+  }
+  return "";
+}
