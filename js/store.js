@@ -1,641 +1,308 @@
-// Where everything is kept: in this browser, on this device (IndexedDB), never
-// on a server. The shape of the data is the same as the desktop program's
-// "Export for Tablet" file, so the two can be swapped either way.
-import * as M from "./money.js";
+// The notes in the RossNotes folder, laid out exactly as the desktop keeps them:
+//   Shopping.md
+//   Novel ideas.md
+//   Novel ideas/          the notes under "Novel ideas"
+//   Pictures/             pictures in notes (not a note)
+//   .order                the order of the notes in a folder (JSON list of names)
+//   .trash/<time>/        deleted notes
+import { safeName, titleOf } from "./md.js";
 
-export const FORMAT = "ross-invoices-data";
-export const KEEP_BACKUPS = 30;
+export const EXT = ".md";
+export const ORDER = ".order";
+export const TRASH = ".trash";
+export const PICTURES = "Pictures";
 
-export const DEFAULT_SETTINGS = {
-  business: { name: "Jacob Ross", address: "", email: "", phone: "", website: "" },
-  numbering: { prefix: "INV-", next: 1, digits: 4 },
-  estimate_numbering: { prefix: "EST-", next: 1, digits: 4 },
-  defaults: { currency: "GBP", terms_days: 30, valid_days: 30, tax_rate: "0", tax_label: "VAT", account: "" },
-  thanks: "THANK YOU",
-  note: "Thank you for your business.",
-  accounts: [],
-  style: "classic",
-};
-
-const clone = (x) => JSON.parse(JSON.stringify(x));
-
-export function newId() {
-  const a = new Uint8Array(6);
-  crypto.getRandomValues(a);
-  return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export function blankAccount(name = "New account", style = "dash") {
-  return { id: newId(), name, style, heading: style === "colon" ? "PAYMENT INFO" : "", title: "",
-    lines: [["Bank Name", ""], ["Account Name", ""], ["Account Number", ""]], currency: "", retired: false };
-}
-
-export function safeFileName(s) {
-  s = String(s || "").replace(/[\\/:*?"<>|\x00-\x1f]+/g, " ").trim().replace(/\s+/g, " ");
-  return (s.slice(0, 90) || "Invoice").replace(/[. ]+$/, "");
-}
-
-// ------------------------------------------------------------------ IndexedDB
-const DB_NAME = "ross-invoices";
-
-function openDb() {
-  return new Promise((ok, fail) => {
-    const r = indexedDB.open(DB_NAME, 1);
-    r.onupgradeneeded = () => {
-      const db = r.result;
-      if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
-      if (!db.objectStoreNames.contains("backups")) db.createObjectStore("backups");
-    };
-    r.onsuccess = () => ok(r.result);
-    r.onerror = () => fail(r.error);
-  });
-}
-
-function tx(db, store, mode, fn) {
-  return new Promise((ok, fail) => {
-    const t = db.transaction(store, mode);
-    const s = t.objectStore(store);
-    let out;
-    const req = fn(s);
-    if (req) req.onsuccess = () => { out = req.result; };
-    t.oncomplete = () => ok(out);
-    t.onerror = () => fail(t.error);
-    t.onabort = () => fail(t.error);
-  });
-}
-
-// ------------------------------------------------------------------ the store
-export class Store {
-  constructor() {
-    this.db = null;
-    this.data = null;
-    this.listeners = [];
+export class Note {
+  constructor(parent, name) {
+    this.parent = parent;   // a Note, or null for the top
+    this.name = name;
+    this.children = [];
+    this.text = null;       // as last read or written
+    this.modified = 0;      // the file's lastModified when last read or written
   }
-
-  static empty() {
-    return { format: FORMAT, version: 2, settings: clone(DEFAULT_SETTINGS), clients: [], services: [], invoices: [], estimates: [] };
-  }
-
-  async open() {
-    this.db = await openDb();
-    const got = await this.kvGet("data");
-    this.data = got ? Store.normalise(got) : Store.empty();
-    if (!got) await this.save();
-    await this.backup();
-    return this;
-  }
-
-  async kvGet(key) { return tx(this.db, "kv", "readonly", (s) => s.get(key)); }
-  async kvSet(key, value) { return tx(this.db, "kv", "readwrite", (s) => s.put(value, key)); }
-
-  onChange(fn) { this.listeners.push(fn); }
-
-  async save() {
-    await this.kvSet("data", clone(this.data));
-    this.listeners.forEach((f) => f());
-  }
-
-  // Fill in anything missing (from an older file, or the desktop program).
-  static normalise(d) {
-    d = clone(d || {});
-    const s = clone(DEFAULT_SETTINGS);
-    for (const [k, v] of Object.entries(d.settings || {})) {
-      if (v && typeof v === "object" && !Array.isArray(v) && typeof s[k] === "object" && !Array.isArray(s[k])) {
-        Object.assign(s[k], v);
-      } else s[k] = v;
-    }
-    delete s.interface_scale;
-    for (const a of s.accounts) {
-      a.id ||= newId();
-      a.style ||= "dash";
-      a.heading ??= ""; a.title ??= ""; a.lines ||= []; a.currency ??= ""; a.retired = !!a.retired;
-    }
-    const out = { format: FORMAT, version: 2, settings: s, clients: [], services: [], invoices: [], estimates: [] };
-    for (const c of d.clients || []) {
-      out.clients.push({ id: +c.id, name: c.name || "", address: c.address || "", email: c.email || "",
-        phone: c.phone || "", currency: c.currency || "", account: c.account || "", notes: c.notes || "" });
-    }
-    for (const v of d.services || []) {
-      out.services.push({ id: +v.id, category: v.category || "", name: v.name || "", description: v.description || "",
-        unit: v.unit || "", price: String(v.price ?? "0") });
-    }
-    for (const i of d.invoices || []) {
-      out.invoices.push({
-        id: +i.id, number: String(i.number || ""), client_id: i.client_id == null ? null : +i.client_id,
-        client: i.client || {}, issue_date: i.issue_date || "", due_date: i.due_date || "",
-        currency: i.currency || "GBP", tax_rate: String(i.tax_rate ?? "0"), tax_label: i.tax_label || "VAT",
-        account_id: i.account_id || "", account: i.account || {}, notes: i.notes || "", created: i.created || "",
-        items: (i.items || []).map((x) => ({ description: x.description || "", quantity: String(x.quantity ?? "1"),
-          unit: x.unit || "", unit_price: String(x.unit_price ?? "0") })),
-        payments: (i.payments || []).map((p, k) => ({ id: +(p.id ?? k + 1), amount: String(p.amount), date: p.date,
-          method: p.method || "", note: p.note || "" })),
-      });
-    }
-    for (const e of d.estimates || []) {
-      out.estimates.push({
-        id: +e.id, number: String(e.number || ""), client_id: e.client_id == null ? null : +e.client_id,
-        client: e.client || {}, issue_date: e.issue_date || "", valid_until: e.valid_until || "",
-        currency: e.currency || "GBP", tax_rate: String(e.tax_rate ?? "0"), tax_label: e.tax_label || "VAT",
-        account_id: e.account_id || "", account: e.account || {}, show_account: !!e.show_account,
-        notes: e.notes || "", status: e.status || "draft", invoice_id: e.invoice_id == null ? null : +e.invoice_id,
-        created: e.created || "",
-        items: (e.items || []).map((x) => ({ description: x.description || "", quantity: String(x.quantity ?? "1"),
-          unit: x.unit || "", unit_price: String(x.unit_price ?? "0") })),
-      });
-    }
+  isRoot() { return this.parent === null; }
+  // the folder this note's file is in, as names from the top
+  folderParts() { return this.parent ? this.parent.childParts() : []; }
+  childParts() { return this.isRoot() ? [] : [...this.folderParts(), this.name]; }
+  ancestors() {
+    const out = [];
+    let p = this.parent;
+    while (p && !p.isRoot()) { out.push(p); p = p.parent; }
     return out;
   }
+  key() { return [...this.ancestors().reverse().map((a) => a.name), this.name].join("/"); }
+  *walk() { for (const c of this.children) { yield c; yield* c.walk(); } }
+  title() { return (this.text != null && titleOf(this.text)) || this.name; }
+}
 
-  get settings() { return this.data.settings; }
+function stamp() {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}`;
+}
 
-  nextIdOf(list) { return list.reduce((m, x) => Math.max(m, +x.id || 0), 0) + 1; }
+// Python's json.dump(names, ensure_ascii=False, indent=0)
+function orderJson(names) {
+  if (!names.length) return "[]";
+  return "[\n" + names.map((n) => JSON.stringify(n)).join(",\n") + "\n]";
+}
 
-  // ---------------------------------------------------------- backups
-  // A copy of everything once a day the app is used; the last 30 kept.
-  async backup(today = M.todayIso()) {
-    const keys = await tx(this.db, "backups", "readonly", (s) => s.getAllKeys());
-    if (!keys.includes(today)) {
-      await tx(this.db, "backups", "readwrite", (s) => s.put(clone(this.data), today));
-      keys.push(today);
-    }
-    keys.sort();
-    const old = keys.slice(0, Math.max(0, keys.length - KEEP_BACKUPS));
-    if (old.length) await tx(this.db, "backups", "readwrite", (s) => { old.forEach((k) => s.delete(k)); });
-  }
-
-  async backups() {
-    const keys = await tx(this.db, "backups", "readonly", (s) => s.getAllKeys());
-    return keys.sort().reverse();
-  }
-
-  async backupData(key) { return tx(this.db, "backups", "readonly", (s) => s.get(key)); }
-
-  async restore(key) {
-    const d = await this.backupData(key);
-    if (!d) return false;
-    await tx(this.db, "backups", "readwrite", (s) => s.put(clone(this.data), "before-restore-" + M.todayIso()));
-    this.data = Store.normalise(d);
-    await this.save();
+async function exists(dir, name, kind) {
+  try {
+    if (kind === "directory") await dir.getDirectoryHandle(name);
+    else await dir.getFileHandle(name);
     return true;
+  } catch (e) { return false; }
+}
+
+async function writeFile(dir, name, data) {
+  const fh = await dir.getFileHandle(name, { create: true });
+  const w = await fh.createWritable();
+  await w.write(data);
+  await w.close();
+  return fh;
+}
+
+async function copyDir(src, dstParent, name) {
+  const dst = await dstParent.getDirectoryHandle(name, { create: true });
+  for await (const [n, h] of src.entries()) {
+    if (h.kind === "file") await writeFile(dst, n, await h.getFile());
+    else await copyDir(h, dst, n);
+  }
+  return dst;
+}
+
+// move or rename a file or folder (the browser's own move where it has one)
+async function moveEntry(fromDir, name, toDir, newName, kind) {
+  const h = kind === "directory" ? await fromDir.getDirectoryHandle(name) : await fromDir.getFileHandle(name);
+  if (typeof h.move === "function") {
+    try {
+      if (fromDir === toDir || await fromDir.isSameEntry(toDir)) await h.move(newName);
+      else await h.move(toDir, newName);
+      return;
+    } catch (e) { /* not on this device: copy instead */ }
+  }
+  if (kind === "directory") await copyDir(h, toDir, newName);
+  else await writeFile(toDir, newName, await h.getFile());
+  await fromDir.removeEntry(name, { recursive: kind === "directory" });
+}
+
+export class Store {
+  constructor(rootHandle) {
+    this.handle = rootHandle;
+    this.root = new Note(null, "");
   }
 
-  // ---------------------------------------------------------- whole-file export and import
-  exportData(source = "web", version = "") {
-    const d = clone(this.data);
-    d.exported = new Date().toISOString().slice(0, 19);
-    d.source = source;
-    d.app_version = version;
+  async dir(parts, create = false) {
+    let d = this.handle;
+    for (const p of parts) d = await d.getDirectoryHandle(p, { create });
     return d;
   }
 
-  static check(d) {
-    if (!d || typeof d !== "object") return "That file isn't Ross Invoices data.";
-    if (d.format !== FORMAT) {
-      if (Array.isArray(d.accounts) || Array.isArray(d)) return "accounts";
-      return "That file isn't Ross Invoices data (from Export for Tablet, or Export on this app).";
-    }
-    return "";
+  // ------------------------------------------------------------ reading
+  async scan() {
+    const root = new Note(null, "");
+    // what we've read already isn't read again unless it changed
+    this.known = new Map([...this.root.walk()].map((n) => [n.key(), n]));
+    root.children = await this.scanDir(root, this.handle);
+    this.root = root;
+    return root;
   }
 
-  // Everything here is replaced by the file (a copy of what was here is kept
-  // first). An older file with no estimates leaves the estimates here alone.
-  async importData(d) {
-    await tx(this.db, "backups", "readwrite", (s) => s.put(clone(this.data), "before-import-" +
-      new Date().toISOString().slice(0, 16).replace(":", "")));
-    const keep = d && !("estimates" in d) ? clone(this.data.estimates || []) : null;
-    const keepNb = d && !("estimates" in d) ? clone(this.settings.estimate_numbering) : null;
-    this.data = Store.normalise(d);
-    if (keep) { this.data.estimates = keep; this.settings.estimate_numbering = keepNb; }
-    await this.save();
-  }
-
-  // ---------------------------------------------------------- accounts
-  accounts(includeRetired = true) {
-    return this.settings.accounts.filter((a) => includeRetired || !a.retired);
-  }
-
-  account(aid) { return this.settings.accounts.find((a) => a.id === aid) || null; }
-
-  async addAccount(acc) {
-    acc = acc || blankAccount();
-    acc.id ||= newId();
-    if (this.settings.accounts.some((a) => a.id === acc.id)) acc.id = newId();
-    this.settings.accounts.push(acc);
-    if (!this.settings.defaults.account) this.settings.defaults.account = acc.id;
-    await this.save();
-    return acc;
-  }
-
-  async saveAccount(acc) {
-    const i = this.settings.accounts.findIndex((a) => a.id === acc.id);
-    if (i < 0) return this.addAccount(acc);
-    this.settings.accounts[i] = acc;
-    await this.save();
-    return acc;
-  }
-
-  async duplicateAccount(aid) {
-    const a = clone(this.account(aid));
-    a.id = newId();
-    a.name += " (copy)";
-    a.retired = false;
-    const i = this.settings.accounts.findIndex((x) => x.id === aid);
-    this.settings.accounts.splice(i + 1, 0, a);
-    await this.save();
-    return a;
-  }
-
-  accountInUse(aid) {
-    return [this.data.invoices.filter((i) => i.account_id === aid).length,
-      this.data.clients.filter((c) => c.account === aid).length];
-  }
-
-  async deleteAccount(aid) {
-    if (this.accountInUse(aid)[0]) return false;
-    this.settings.accounts = this.settings.accounts.filter((a) => a.id !== aid);
-    if (this.settings.defaults.account === aid) {
-      const live = this.accounts(false);
-      this.settings.defaults.account = live.length ? live[0].id : "";
-    }
-    this.data.clients.forEach((c) => { if (c.account === aid) c.account = ""; });
-    await this.save();
-    return true;
-  }
-
-  async importAccounts(items) {
-    const added = [];
-    const names = new Set(this.settings.accounts.map((a) => a.name));
-    const values = new Set(this.settings.accounts.map((a) => JSON.stringify((a.lines || []).map((l) => l[1]).filter(Boolean))));
-    for (let a of items) {
-      if (!a || typeof a !== "object" || !a.name) continue;
-      a = clone(a);
-      if (names.has(a.name) || values.has(JSON.stringify((a.lines || []).map((l) => l[1]).filter(Boolean)))) continue;
-      a.id = newId();
-      a.style ||= "dash"; a.heading ??= ""; a.title ??= ""; a.lines ||= []; a.currency ??= ""; a.retired = false;
-      this.settings.accounts.push(a);
-      added.push(a);
-    }
-    if (added.length && !this.settings.defaults.account) this.settings.defaults.account = added[0].id;
-    await this.save();
-    return added;
-  }
-
-  // ---------------------------------------------------------- clients
-  clients() {
-    return [...this.data.clients].sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base" }));
-  }
-
-  client(cid) { return this.data.clients.find((c) => c.id === +cid) || null; }
-
-  async saveClient(c) {
-    const fields = ["name", "address", "email", "phone", "currency", "account", "notes"];
-    const row = Object.fromEntries(fields.map((k) => [k, c[k] || ""]));
-    if (c.id) {
-      Object.assign(this.client(c.id), row);
-    } else {
-      row.id = this.nextIdOf(this.data.clients);
-      this.data.clients.push(row);
-      c.id = row.id;
-    }
-    await this.save();
-    return c.id;
-  }
-
-  clientInvoiceCount(cid) { return this.data.invoices.filter((i) => i.client_id === +cid).length; }
-
-  async deleteClient(cid) {
-    if (this.clientInvoiceCount(cid)) return false;
-    this.data.clients = this.data.clients.filter((c) => c.id !== +cid);
-    await this.save();
-    return true;
-  }
-
-  // ---------------------------------------------------------- services
-  services() {
-    const k = (s) => s.toLocaleLowerCase();
-    return [...this.data.services].sort((a, b) => k(a.category).localeCompare(k(b.category)) ||
-      k(a.name).localeCompare(k(b.name)));
-  }
-
-  service(sid) { return this.data.services.find((s) => s.id === +sid) || null; }
-
-  categories() {
-    return [...new Set(this.data.services.map((s) => s.category).filter(Boolean))]
-      .sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
-  }
-
-  async saveService(s) {
-    const fields = ["category", "name", "description", "unit", "price"];
-    const row = Object.fromEntries(fields.map((k) => [k, String(s[k] ?? "")]));
-    if (s.id) Object.assign(this.service(s.id), row);
-    else {
-      row.id = this.nextIdOf(this.data.services);
-      this.data.services.push(row);
-      s.id = row.id;
-    }
-    await this.save();
-    return s.id;
-  }
-
-  async deleteService(sid) {
-    this.data.services = this.data.services.filter((s) => s.id !== +sid);
-    await this.save();
-  }
-
-  // ---------------------------------------------------------- numbering
-  nb(kind = "invoice") {
-    return kind === "estimate" ? (this.settings.estimate_numbering ||= { prefix: "EST-", next: 1, digits: 4 })
-      : this.settings.numbering;
-  }
-
-  formatNumber(n, kind = "invoice") {
-    const nb = this.nb(kind);
-    return (nb.prefix || "") + String(n).padStart(Math.max(1, +nb.digits || 1), "0");
-  }
-
-  nextNumber(kind = "invoice") {
-    let n = Math.max(1, +this.nb(kind).next || 1);
-    while (this.numberTaken(this.formatNumber(n, kind), null, kind)) n++;
-    return this.formatNumber(n, kind);
-  }
-
-  numberTaken(number, exceptId = null, kind = "invoice") {
-    const r = (kind === "estimate" ? this.data.estimates : this.data.invoices).find((i) => i.number === number);
-    return !!r && r.id !== exceptId;
-  }
-
-  advanceNumbering(number, kind = "invoice") {
-    const nb = this.nb(kind);
-    const p = nb.prefix || "";
-    const rest = number.slice(p.length);
-    if (number.startsWith(p) && /^\d+$/.test(rest)) {
-      const n = parseInt(rest, 10);
-      if (n >= (+nb.next || 1)) nb.next = n + 1;
-    }
-  }
-
-  // ---------------------------------------------------------- invoices
-  // The client's and the account's details are copied into the invoice, so
-  // later changes to them leave it as it was.
-  async saveInvoice(inv, items) {
-    const c = this.client(inv.client_id) || {};
-    const acc = this.account(inv.account_id) || {};
-    const row = {
-      number: String(inv.number || "").trim(),
-      client_id: inv.client_id == null ? null : +inv.client_id,
-      client: Object.fromEntries(["name", "address", "email", "phone"].map((k) => [k, c[k] || ""])),
-      issue_date: inv.issue_date,
-      due_date: inv.due_date || "",
-      currency: inv.currency || "GBP",
-      tax_rate: M.fmtQty(inv.tax_rate || "0"),
-      tax_label: inv.tax_label || "VAT",
-      account_id: acc.id || "",
-      account: clone(acc),
-      notes: inv.notes || "",
-    };
-    if (this.numberTaken(row.number, inv.id || null)) throw new Error(`There is already an invoice numbered ${row.number}.`);
-    row.items = items.filter((it) => (it.description || "").trim()).map((it) => ({
-      description: it.description.trim(), quantity: M.fmtQty(it.quantity || "0"), unit: it.unit || "",
-      unit_price: M.fmtQty(it.unit_price || "0") }));
-    let id = inv.id;
-    if (id) {
-      const old = this.data.invoices.find((i) => i.id === id);
-      Object.assign(old, row);
-    } else {
-      id = this.nextIdOf(this.data.invoices);
-      row.id = id;
-      row.created = new Date().toISOString().slice(0, 19);
-      row.payments = [];
-      this.data.invoices.push(row);
-    }
-    this.advanceNumbering(row.number);
-    await this.save();
-    return id;
-  }
-
-  invoice(iid) {
-    const r = this.data.invoices.find((i) => i.id === +iid);
-    if (!r) return null;
-    const inv = clone(r);
-    inv.payments.sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.id - b.id);
-    return Object.assign(inv, Store.totals(inv));
-  }
-
-  // Totals in pence (BigInt), exactly as the desktop program works them out.
-  static totals(inv) {
-    const sub = inv.items.reduce((s, i) => s + M.lineAmount(i.quantity, i.unit_price), 0n);
-    const tax = M.taxOf(sub, inv.tax_rate || "0");
-    const total = sub + tax;
-    const paidUnits = (inv.payments || []).reduce((s, p) => s + M.units(p.amount), 0n);
-    const paid = M.cents(paidUnits);
-    return { subtotal: sub, tax, total, paid, balance: total - paid };
-  }
-
-  static status(inv, today = M.todayIso()) {
-    if (inv.total > 0n && inv.balance <= 0n) return "Paid";
-    if (inv.total <= 0n && inv.paid <= 0n) return "Nothing to pay";
-    const late = !!inv.due_date && inv.due_date < today;
-    if (inv.paid > 0n) return late ? "Part paid, overdue" : "Part paid";
-    return late ? "Overdue" : "Unpaid";
-  }
-
-  invoices() {
-    return this.data.invoices
-      .map((i) => this.invoice(i.id))
-      .sort((a, b) => (b.issue_date || "").localeCompare(a.issue_date || "") || b.number.localeCompare(a.number));
-  }
-
-  async deleteInvoice(iid) {
-    this.data.invoices = this.data.invoices.filter((i) => i.id !== +iid);
-    await this.save();
-  }
-
-  async duplicateInvoice(iid, today = M.todayIso()) {
-    const old = this.invoice(iid);
-    const gap = M.daysBetween(old.issue_date, old.due_date);
-    const acc = this.account(old.account_id);
-    const inv = { number: this.nextNumber(), client_id: old.client_id, issue_date: today,
-      due_date: old.due_date && gap != null ? M.addDays(today, gap) : "",
-      currency: old.currency, tax_rate: old.tax_rate, tax_label: old.tax_label,
-      account_id: acc && !acc.retired ? old.account_id : (this.settings.defaults.account || ""), notes: old.notes };
-    return this.saveInvoice(inv, old.items);
-  }
-
-  async addPayment(iid, amount, date, method = "", note = "") {
-    const r = this.data.invoices.find((i) => i.id === +iid);
-    const pid = r.payments.reduce((m, p) => Math.max(m, +p.id || 0), 0) + 1;
-    r.payments.push({ id: pid, amount: M.centsToText(M.cents(amount)), date, method, note });
-    await this.save();
-    return pid;
-  }
-
-  async deletePayment(iid, pid) {
-    const r = this.data.invoices.find((i) => i.id === +iid);
-    r.payments = r.payments.filter((p) => p.id !== pid);
-    await this.save();
-  }
-
-  // ---------------------------------------------------------- estimates
-  // Like invoices, with a valid-until date instead of a due date, a status
-  // (draft, sent, accepted, declined), and payment details off unless ticked.
-  static EST_STATUSES = [["draft", "Draft"], ["sent", "Sent"], ["accepted", "Accepted"], ["declined", "Declined"]];
-
-  async saveEstimate(est, items) {
-    const c = this.client(est.client_id) || {};
-    const acc = this.account(est.account_id) || {};
-    const row = {
-      number: String(est.number || "").trim(),
-      client_id: est.client_id == null ? null : +est.client_id,
-      client: Object.fromEntries(["name", "address", "email", "phone"].map((k) => [k, c[k] || ""])),
-      issue_date: est.issue_date,
-      valid_until: est.valid_until || "",
-      currency: est.currency || "GBP",
-      tax_rate: M.fmtQty(est.tax_rate || "0"),
-      tax_label: est.tax_label || "VAT",
-      account_id: acc.id || "",
-      account: clone(acc),
-      show_account: !!est.show_account,
-      notes: est.notes || "",
-    };
-    if (this.numberTaken(row.number, est.id || null, "estimate")) throw new Error(`There is already an estimate numbered ${row.number}.`);
-    row.items = items.filter((it) => (it.description || "").trim()).map((it) => ({
-      description: it.description.trim(), quantity: M.fmtQty(it.quantity || "0"), unit: it.unit || "",
-      unit_price: M.fmtQty(it.unit_price || "0") }));
-    let id = est.id;
-    if (id) {
-      Object.assign(this.data.estimates.find((e) => e.id === id), row);
-    } else {
-      id = this.nextIdOf(this.data.estimates);
-      Object.assign(row, { id, created: new Date().toISOString().slice(0, 19), status: est.status || "draft",
-        invoice_id: null });
-      this.data.estimates.push(row);
-    }
-    this.advanceNumbering(row.number, "estimate");
-    await this.save();
-    return id;
-  }
-
-  estimate(eid) {
-    const r = this.data.estimates.find((e) => e.id === +eid);
-    if (!r) return null;
-    const est = clone(r);
-    est.kind = "estimate";
-    est.payments = [];
-    return Object.assign(est, Store.totals(est));
-  }
-
-  estimates() {
-    return this.data.estimates
-      .map((e) => this.estimate(e.id))
-      .sort((a, b) => (b.issue_date || "").localeCompare(a.issue_date || "") || b.number.localeCompare(a.number));
-  }
-
-  static estimateStatus(est, today = M.todayIso()) {
-    const st = est.status || "draft";
-    if ((st === "draft" || st === "sent") && est.valid_until && est.valid_until < today) return "Expired";
-    return (Store.EST_STATUSES.find(([k]) => k === st) || [0, "Draft"])[1];
-  }
-
-  async setEstimateStatus(eid, status) {
-    this.data.estimates.find((e) => e.id === +eid).status = status;
-    await this.save();
-  }
-
-  async deleteEstimate(eid) {
-    this.data.estimates = this.data.estimates.filter((e) => e.id !== +eid);
-    await this.save();
-  }
-
-  async duplicateEstimate(eid, today = M.todayIso()) {
-    const old = this.estimate(eid);
-    const gap = M.daysBetween(old.issue_date, old.valid_until);
-    const acc = this.account(old.account_id);
-    const est = { number: this.nextNumber("estimate"), client_id: old.client_id, issue_date: today,
-      valid_until: old.valid_until && gap != null ? M.addDays(today, gap) : "",
-      currency: old.currency, tax_rate: old.tax_rate, tax_label: old.tax_label,
-      account_id: acc && !acc.retired ? old.account_id : (this.settings.defaults.account || ""),
-      show_account: old.show_account, notes: old.notes };
-    return this.saveEstimate(est, old.items);
-  }
-
-  // The client said yes: an invoice with the same client, lines and prices,
-  // dated today, due after the usual terms.
-  async estimateToInvoice(eid, today = M.todayIso()) {
-    const est = this.estimate(eid);
-    const days = +this.settings.defaults.terms_days || 0;
-    let acc = this.account(est.account_id);
-    if (!acc || acc.retired) acc = this.account(this.settings.defaults.account || "");
-    const iid = await this.saveInvoice({ number: this.nextNumber(), client_id: est.client_id, issue_date: today,
-      due_date: days ? M.addDays(today, days) : "", currency: est.currency, tax_rate: est.tax_rate,
-      tax_label: est.tax_label, account_id: (acc || {}).id || "", notes: this.settings.note || "" }, est.items);
-    const r = this.data.estimates.find((e) => e.id === +eid);
-    r.status = "accepted";
-    r.invoice_id = iid;
-    await this.save();
-    return iid;
-  }
-
-  // Sent and not yet answered (nor expired): how many, and per currency.
-  estimatesWaiting(today = M.todayIso()) {
-    let n = 0;
-    const amounts = {};
-    for (const e of this.estimates()) {
-      if (Store.estimateStatus(e, today) !== "Sent") continue;
-      n++;
-      amounts[e.currency] = (amounts[e.currency] || 0n) + e.total;
-    }
-    return { n, amounts };
-  }
-
-  pdfName(inv) {
-    return safeFileName(`${inv.number} ${(inv.client || {}).name || ""}`) + ".pdf";
-  }
-
-  // ---------------------------------------------------------- figures
-  // Per currency: invoiced (by issue date), received (by payment date) and
-  // still owed, in the UK tax year starting 6 April <year>.
-  yearSummary(year) {
-    const [start, end] = M.taxYearSpan(year);
-    const out = {};
-    for (const inv of this.invoices()) {
-      const cur = inv.currency;
-      const s = out[cur] ||= { invoiced: 0n, received: 0n, owed: 0n, count: 0 };
-      const d = inv.issue_date;
-      if (d && d >= start && d <= end) {
-        s.invoiced += inv.total;
-        s.count++;
-        if (inv.balance > 0n) s.owed += inv.balance;
-      }
-      for (const p of inv.payments) if (p.date >= start && p.date <= end) s.received += M.cents(p.amount);
-    }
-    return Object.fromEntries(Object.entries(out).filter(([, v]) => v.count || v.received));
-  }
-
-  // The four figures on the Dashboard, for a tax year (or all time when year is null).
-  dashboard(year = null, today = M.todayIso()) {
-    const span = year != null ? M.taxYearSpan(year) : null;
-    const inside = (d) => !!d && (!span || (d >= span[0] && d <= span[1]));
-    const out = { invoices: 0, outstanding: {}, collected: {}, overdue: 0, overdue_amount: {} };
-    for (const inv of this.invoices()) {
-      const cur = inv.currency;
-      if (inside(inv.issue_date)) {
-        out.invoices++;
-        if (inv.balance > 0n) {
-          out.outstanding[cur] = (out.outstanding[cur] || 0n) + inv.balance;
-          if (Store.status(inv, today).includes("verdue")) {
-            out.overdue++;
-            out.overdue_amount[cur] = (out.overdue_amount[cur] || 0n) + inv.balance;
-          }
+  async scanDir(parent, d) {
+    const files = new Map(), dirs = [];
+    let order = [];
+    for await (const [name, h] of d.entries()) {
+      if (name.startsWith(".")) {
+        if (name === ORDER && h.kind === "file") {
+          try {
+            const v = JSON.parse(await (await h.getFile()).text());
+            if (Array.isArray(v)) order = v.filter((x) => typeof x === "string");
+          } catch (e) { /* a bad order file: alphabetical */ }
         }
+        continue;
       }
-      for (const p of inv.payments) if (inside(p.date)) out.collected[cur] = (out.collected[cur] || 0n) + M.cents(p.amount);
+      if (h.kind === "file" && name.endsWith(EXT) && !name.endsWith(".rossnote-tmp")) files.set(name.slice(0, -EXT.length), h);
+      else if (h.kind === "directory" && !(parent.isRoot() && name === PICTURES)) dirs.push(name);
+    }
+    // a folder with no note of its own still shows (as a note made for it)
+    for (const name of dirs) {
+      if (!files.has(name)) files.set(name, await writeFile(d, name + EXT, "# " + name + "\n"));
+    }
+    const names = [...files.keys()];
+    const ordered = [...order.filter((n) => files.has(n)),
+      ...names.filter((n) => !order.includes(n)).sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0)];
+    const out = [];
+    for (const name of ordered) {
+      const note = new Note(parent, name);
+      try {
+        const f = await files.get(name).getFile();
+        note.modified = f.lastModified;
+        const o = this.known && this.known.get(note.key());
+        note.text = o && o.modified === f.lastModified && o.text != null ? o.text : await f.text();
+      } catch (e) { note.text = ""; }
+      if (dirs.includes(name)) note.children = await this.scanDir(note, await d.getDirectoryHandle(name));
+      out.push(note);
     }
     return out;
   }
 
-  years() {
-    const ys = new Set(this.data.invoices.map((i) => M.taxYearOf(i.issue_date)).filter((y) => y != null));
-    ys.add(M.taxYearOf(M.todayIso()));
-    return [...ys].sort((a, b) => b - a);
+  find(key) {
+    if (!key) return null;
+    let node = this.root;
+    for (const part of key.split("/")) {
+      node = node.children.find((c) => c.name === part);
+      if (!node) return null;
+    }
+    return node;
+  }
+
+  all() { return [...this.root.walk()]; }
+
+  async read(note) {
+    const d = await this.dir(note.folderParts());
+    const f = await (await d.getFileHandle(note.name + EXT)).getFile();
+    note.text = await f.text();
+    note.modified = f.lastModified;
+    return note.text;
+  }
+
+  // the file's state now: {modified, text} (text only if it changed since we last saw it)
+  async peek(note) {
+    try {
+      const d = await this.dir(note.folderParts());
+      const f = await (await d.getFileHandle(note.name + EXT)).getFile();
+      if (f.lastModified === note.modified) return { modified: f.lastModified, text: note.text };
+      return { modified: f.lastModified, text: await f.text() };
+    } catch (e) { return null; }
+  }
+
+  // ------------------------------------------------------------ writing
+  async write(note, text) {
+    const d = await this.dir(note.folderParts(), true);
+    const fh = await writeFile(d, note.name + EXT, text);
+    note.text = text;
+    note.modified = (await fh.getFile()).lastModified;
+  }
+
+  async writeOrder(parent) {
+    const parts = parent.childParts();
+    if (!parent.children.length && !parent.isRoot()) {
+      // no notes left under it: its folder goes (if nothing else is in it)
+      try {
+        const up = await this.dir(parts.slice(0, -1));
+        const d = await up.getDirectoryHandle(parts[parts.length - 1]);
+        try { await d.removeEntry(ORDER); } catch (e) { /* none */ }
+        let empty = true;
+        for await (const _ of d.keys()) { empty = false; break; }
+        if (empty) await up.removeEntry(parts[parts.length - 1]);
+      } catch (e) { /* no folder */ }
+      return;
+    }
+    const d = await this.dir(parts, true);
+    await writeFile(d, ORDER, orderJson(parent.children.map((c) => c.name)));
+  }
+
+  async uniqueName(parent, want, exclude = null) {
+    const base = safeName(want);
+    const taken = new Set(parent.children.filter((c) => c !== exclude).map((c) => c.name.toLowerCase()));
+    if (parent.isRoot()) taken.add(PICTURES.toLowerCase());
+    let d = null;
+    try { d = await this.dir(parent.childParts()); } catch (e) { /* not made yet */ }
+    let name = base, k = 2;
+    while (taken.has(name.toLowerCase()) ||
+           (d && (!exclude || name !== exclude.name) && await exists(d, name + EXT, "file"))) {
+      name = `${base} (${k})`;
+      k += 1;
+    }
+    return name;
+  }
+
+  async newNote(parent, index = null, text = "") {
+    const name = await this.uniqueName(parent, "Untitled");
+    const note = new Note(parent, name);
+    if (index == null) parent.children.push(note); else parent.children.splice(index, 0, note);
+    await this.write(note, text);
+    await this.writeOrder(parent);
+    return note;
+  }
+
+  // the note's name follows its title; its folder (the notes under it) goes with it
+  async rename(note, title) {
+    const parent = note.parent;
+    const name = await this.uniqueName(parent, title, note);
+    if (name === note.name) return false;
+    const d = await this.dir(parent.childParts());
+    await moveEntry(d, note.name + EXT, d, name + EXT, "file");
+    if (await exists(d, note.name, "directory")) await moveEntry(d, note.name, d, name, "directory");
+    note.name = name;
+    await this.writeOrder(parent);
+    return true;
+  }
+
+  async move(note, newParent, index) {
+    if (note === newParent || [...note.walk()].includes(newParent)) return false;
+    const oldParent = note.parent;
+    const oldIndex = oldParent.children.indexOf(note);
+    if (oldParent === newParent) {
+      oldParent.children.splice(oldIndex, 1);
+      if (index > oldIndex) index -= 1;
+      newParent.children.splice(Math.max(0, Math.min(index, newParent.children.length)), 0, note);
+      await this.writeOrder(newParent);
+      return true;
+    }
+    const from = await this.dir(oldParent.childParts());
+    oldParent.children.splice(oldIndex, 1);
+    const name = await this.uniqueName(newParent, note.name);
+    const to = await this.dir(newParent.childParts(), true);
+    await moveEntry(from, note.name + EXT, to, name + EXT, "file");
+    if (await exists(from, note.name, "directory")) await moveEntry(from, note.name, to, name, "directory");
+    note.parent = newParent;
+    note.name = name;
+    newParent.children.splice(Math.max(0, Math.min(index, newParent.children.length)), 0, note);
+    await this.writeOrder(oldParent);
+    await this.writeOrder(newParent);
+    return true;
+  }
+
+  async trashDir(label = "") {
+    const t = await this.handle.getDirectoryHandle(TRASH, { create: true });
+    return t.getDirectoryHandle(stamp() + label, { create: true });
+  }
+
+  async delete(note) {
+    const trash = await this.trashDir();
+    const d = await this.dir(note.folderParts());
+    if (await exists(d, note.name + EXT, "file")) await moveEntry(d, note.name + EXT, trash, note.name + EXT, "file");
+    if (await exists(d, note.name, "directory")) await moveEntry(d, note.name, trash, note.name, "directory");
+    const parent = note.parent;
+    parent.children.splice(parent.children.indexOf(note), 1);
+    await this.writeOrder(parent);
+  }
+
+  // another device's version of a note, kept before ours replaces it
+  async keepConflict(note, text) {
+    const trash = await this.trashDir(" other version");
+    await writeFile(trash, note.name + EXT, text);
+  }
+
+  // ------------------------------------------------------------ pictures
+  async uniquePicture(name) {
+    const d = await this.handle.getDirectoryHandle(PICTURES, { create: true });
+    const dot = name.lastIndexOf(".");
+    const stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot).toLowerCase() : "";
+    let n = stem + ext, k = 2;
+    while (await exists(d, n, "file")) { n = `${stem} (${k})${ext}`; k += 1; }
+    return [d, n];
+  }
+
+  async savePicture(blob, name) {
+    const [d, n] = await this.uniquePicture(name);
+    await writeFile(d, n, blob);
+    return [PICTURES, n];
+  }
+
+  async pictureFile(parts) {
+    const d = await this.dir(parts.slice(0, -1));
+    return (await d.getFileHandle(parts[parts.length - 1])).getFile();
   }
 }

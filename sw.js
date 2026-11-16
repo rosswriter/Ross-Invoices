@@ -1,13 +1,12 @@
-// Keeps a copy of Ross Invoices on the device, so it opens with no connection.
+// Keeps a copy of Ross Note on the device, so it opens with no connection.
 // A new version (a new CACHE name) is fetched in the background and used the
-// next time the app is opened.
-const CACHE = "ross-invoices-1.1.0";
+// next time the app is opened. (The notes themselves are in your folder, not here.)
+const PREFIX = "ross-note-";
+const CACHE = PREFIX + "1.0.0";
 const FILES = [
   "./", "index.html", "manifest.webmanifest", "css/app.css",
-  "js/app.js", "js/ui.js", "js/store.js", "js/money.js", "js/pdf.js", "js/files.js",
-  "vendor/pdf-lib.min.js", "vendor/fontkit.umd.min.js",
-  "fonts/Inter-Regular.ttf", "fonts/Inter-SemiBold.ttf", "fonts/Inter-Bold.ttf", "fonts/Inter-Italic.ttf",
-  "fonts/Inter-Regular.woff2", "fonts/Inter-SemiBold.woff2", "fonts/Inter-Bold.woff2", "fonts/Inter-Italic.woff2",
+  "js/app.js", "js/md.js", "js/editor.js", "js/store.js",
+  "fonts/Caladea-Regular.woff2", "fonts/Caladea-Bold.woff2", "fonts/Caladea-Italic.woff2", "fonts/Caladea-BoldItalic.woff2",
   "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png", "icons/apple-touch-icon.png",
 ];
 
@@ -16,7 +15,7 @@ self.addEventListener("install", (e) => {
 });
 
 self.addEventListener("activate", (e) => {
-  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k.startsWith(PREFIX) && k !== CACHE).map((k) => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 

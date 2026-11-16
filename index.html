@@ -2,40 +2,84 @@
 <html lang="en-GB">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Ross Invoices</title>
-<meta name="description" content="Invoices for freelance work: clients, services, payment accounts, PDFs. Kept on this device; works offline.">
-<meta name="theme-color" content="#1f3b57">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>Ross Note</title>
+<meta name="description" content="A simple, fast tree of notes, kept as Markdown files in your RossNotes folder.">
+<meta name="theme-color" content="#1b523d">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Invoices">
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
 <div id="app">
-  <aside id="side">
-    <div id="wordmark"></div>
-    <div class="side-rule"></div>
-    <nav id="nav"></nav>
-    <div id="side-note">Kept on this device<br>Works offline</div>
-  </aside>
-  <div id="scrim"></div>
-  <div id="content">
-    <header id="top">
-      <button id="menu" type="button" aria-label="Menu">☰</button>
-      <span id="toptitle"></span>
-      <span id="topname"></span>
-    </header>
-    <main id="main"><p class="loading">Opening…</p></main>
+  <header id="toolbar" role="toolbar" aria-label="Formatting">
+    <button id="b-list" class="tb" title="Show or hide the note list (Ctrl+Shift+L)" aria-label="Note list">☰</button>
+    <button id="b-new" class="tb" title="New note">New</button>
+    <span class="sep"></span>
+    <button data-cmd="bold" class="tb fmt" title="Bold (Ctrl+B)"><b>B</b></button>
+    <button data-cmd="italic" class="tb fmt" title="Italic (Ctrl+I)"><i>I</i></button>
+    <button data-cmd="underline" class="tb fmt" title="Underline (Ctrl+U)"><u>U</u></button>
+    <button data-cmd="strike" class="tb fmt" title="Strikethrough (Ctrl+Shift+X)"><s>S</s></button>
+    <button data-cmd="highlight" class="tb fmt hl" title="Highlight (Ctrl+Shift+H)">H</button>
+    <span class="sep"></span>
+    <button data-cmd="h1" class="tb" title="Heading 1 (Ctrl+1)"><b>H1</b></button>
+    <button data-cmd="h2" class="tb" title="Heading 2 (Ctrl+2)"><b>H2</b></button>
+    <button data-cmd="h3" class="tb" title="Heading 3 (Ctrl+3)"><b>H3</b></button>
+    <button data-cmd="normal" class="tb" title="Normal text (Ctrl+Shift+N)">¶</button>
+    <span class="sep"></span>
+    <button data-cmd="ul" class="tb" title="Bullet list (Ctrl+Shift+8)">• List</button>
+    <button data-cmd="ol" class="tb" title="Numbered list (Ctrl+Shift+7)">1. List</button>
+    <button data-cmd="quote" class="tb" title="Indented quote (Ctrl+M)">❝ Quote</button>
+    <span class="sep"></span>
+    <button data-cmd="date" class="tb" title="Today's date (Ctrl+;)">Date</button>
+    <button data-cmd="picture" class="tb" title="Insert a picture or photo">Picture</button>
+    <span class="sep"></span>
+    <button data-cmd="undo" class="tb" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+    <button data-cmd="redo" class="tb" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
+    <span class="sep"></span>
+    <button data-cmd="smaller" class="tb" title="Smaller text (Ctrl+−)">A−</button>
+    <button data-cmd="bigger" class="tb" title="Larger text (Ctrl+=)">A+</button>
+    <button data-cmd="dark" class="tb" title="Light / dark (Ctrl+Shift+D)" aria-label="Light or dark">☾</button>
+    <button id="b-more" class="tb" title="More" aria-label="More">⋯</button>
+  </header>
+  <div id="main">
+    <aside id="side">
+      <div id="side-top">
+        <input id="search" type="search" placeholder="Search the notes…" autocomplete="off">
+        <div id="treebar">
+          <button data-tree="new" title="New note after this one">+</button>
+          <button data-tree="child" title="New note under this one">+›</button>
+          <button data-tree="up" title="Move up (Alt+Up)">↑</button>
+          <button data-tree="down" title="Move down (Alt+Down)">↓</button>
+          <button data-tree="out" title="Move out a level (Alt+Left)">←</button>
+          <button data-tree="in" title="Move under the note above (Alt+Right)">→</button>
+          <button data-tree="delete" title="Delete the note (to the .trash folder)">🗑</button>
+        </div>
+      </div>
+      <div id="tree" role="tree"></div>
+      <div id="count"></div>
+    </aside>
+    <div id="divider" title="Drag to make the list wider or narrower"></div>
+    <section id="pane">
+      <div id="head"></div>
+      <div id="scroller"><div id="page" contenteditable="true" spellcheck="true" autocapitalize="sentences"></div></div>
+    </section>
+  </div>
+  <div id="chip" hidden></div>
+  <div id="menu" hidden></div>
+  <div id="toast" hidden></div>
+</div>
+<div id="start" hidden>
+  <div class="card">
+    <img src="icons/icon-192.png" alt="" width="72" height="72">
+    <h1>Ross Note</h1>
+    <p id="start-msg"></p>
+    <div id="start-buttons"></div>
+    <p class="small" id="start-note"></p>
   </div>
 </div>
-<div id="sheets"></div>
-<div id="toast" role="status" aria-live="polite"></div>
-<script src="vendor/pdf-lib.min.js"></script>
-<script src="vendor/fontkit.umd.min.js"></script>
+<input id="file-pic" type="file" accept="image/*" multiple hidden>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>
