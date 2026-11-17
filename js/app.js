@@ -1,10 +1,11 @@
 // Ross Note for the tablet: the RossNotes folder (kept in step with the laptop
 // by a sync app such as Drivesync), read and written in place.
-import * as md from "./md.js";
-import * as ed from "./editor.js";
-import { Store, PICTURES } from "./store.js";
+import * as md from "./md.js?v=2.1.2";
+import * as ed from "./editor.js?v=2.1.2";
+import { Store, PICTURES } from "./store.js?v=2.1.2";
+import { ProjectStore, DocxStore, MdFileStore, findProjectFiles, FLAG_COLOURS } from "./project.js?v=2.1.2";
 
-export const VERSION = "1.3.0";
+export const VERSION = "2.1.2";
 const SAVE_AFTER_MS = 700;
 const LONG_SIDE = 2000;
 const SPACINGS = [["Single", 100], ["1.15", 115], ["1.5", 150], ["Double", 200]];
@@ -18,7 +19,22 @@ const S = {
 // ------------------------------------------------------------------ the two panes (one unless split)
 const P = [0, 1].map((k) => {
   const el = $("pane" + k);
-  return { k, el, head: el.querySelector(".head"), scroller: el.querySelector(".scroller"),
+  const head = el.querySelector(".head");
+  head.innerHTML = '<span class="hname"></span><button type="button" class="hcomments" hidden></button><span class="hwords"></span>';
+  // the page and, beside it (or under it when the pane is narrow), the scene's comments
+  const scroller = el.querySelector(".scroller");
+  const pbody = document.createElement("div");
+  pbody.className = "pbody";
+  scroller.before(pbody);
+  pbody.appendChild(scroller);
+  const cpanel = document.createElement("aside");
+  cpanel.className = "cpanel";
+  cpanel.hidden = true;
+  pbody.appendChild(cpanel);
+  const hc = head.querySelector(".hcomments");
+  hc.addEventListener("click", (e) => { e.preventDefault(); toggleComments(); });
+  hc.addEventListener("mousedown", (e) => e.preventDefault());
+  return { k, el, head, hname: head.firstChild, hcomments: hc, hwords: head.lastChild, scroller, cpanel,
     page: el.querySelector(".page"), note: null, dirty: false, timer: 0 };
 });
 let A = P[0];            // the pane you're working in
@@ -74,6 +90,7 @@ function layout() {
   for (const b of document.querySelectorAll("[data-cmd=splith],[data-cmd=splitv]")) {
     b.classList.toggle("on", split === (b.dataset.cmd === "splith" ? "h" : "v"));
   }
+  if (typeof renderComments === "function") renderComments();
 }
 
 // Ctrl+\ side by side, Ctrl+Shift+\ top and bottom; the same again goes back to one
@@ -102,6 +119,27 @@ async function setSplit(kind) {
   saveSettings();
   layout();
   updateHead();
+}
+
+// ------------------------------------------------------------------ places: RossNotes, or a Ross Writer project
+// each keeps its own open notes and open branches in the list
+function placeId(store) {
+  if (store && store.isDoc) return "doc:" + store.fileName;
+  return store && store.isProject ? "project:" + store.handle.name + "/" + store.fileName : "notes";
+}
+function enterPlace(store) {
+  const s = S.settings;
+  s.places = s.places || {};
+  if (S.store) {
+    // leaving one place for another: this one's open notes kept, the other's taken up
+    s.places[placeId(S.store)] = { open: s.open, open2: s.open2, expanded: s.expanded };
+    const p = s.places[placeId(store)];
+    if (p) Object.assign(s, { open: p.open || "", open2: p.open2 || "", expanded: p.expanded || [] });
+    else Object.assign(s, { open: "", open2: "", expanded: [] });
+  }
+  // (starting up: the settings are already the last place's)
+  s.where = store.isDoc ? "doc" : store.isProject ? "project" : "notes";
+  saveSettings();
 }
 
 // ------------------------------------------------------------------ the folder (kept between visits)
@@ -141,11 +179,29 @@ function queue(fn) {
 async function start() {
   applyLook();
   if ("serviceWorker" in navigator && location.protocol !== "file:" && !location.search.includes("nosw")) {
-    navigator.serviceWorker.register("sw.js").catch(() => {});
+    navigator.serviceWorker.register("sw.js").then((r) => r.update()).catch(() => {});
   }
   const test = new URLSearchParams(location.search).get("test");
   if (test === "opfs") return openRoot(await navigator.storage.getDirectory(), true);
   let handle = null;
+  if (S.settings.where === "doc") {
+    let fh = null;
+    try { fh = await kvGet("docFile"); } catch (e) { /* none */ }
+    if (fh && fh.kind === "file") {
+      const mode = fh.queryPermission ? await fh.queryPermission({ mode: "readwrite" }) : "granted";
+      if (mode === "granted") return openDocFile(fh);
+      return showStart("doc", fh, fh.name);
+    }
+  }
+  if (S.settings.where === "project") {
+    let ph = null, pf = null;
+    try { ph = await kvGet("project"); pf = await kvGet("projectFile"); } catch (e) { /* none */ }
+    if (ph && ph.kind === "directory" && pf) {
+      const mode = ph.queryPermission ? await ph.queryPermission({ mode: "readwrite" }) : "granted";
+      if (mode === "granted") return openProject(ph, pf);
+      return showStart("project", ph, pf);
+    }
+  }
   try { handle = await kvGet("root"); } catch (e) { /* none */ }
   if (handle && handle.kind === "directory") {
     const mode = handle.queryPermission ? await handle.queryPermission({ mode: "readwrite" }) : "granted";
@@ -155,8 +211,9 @@ async function start() {
   showStart(window.showDirectoryPicker ? "first" : "unsupported");
 }
 
-function showStart(kind, handle) {
+function showStart(kind, handle, file) {
   $("start").hidden = false;
+  $("start").querySelector("h1").textContent = "Ross Note " + VERSION;
   const msg = $("start-msg"), btns = $("start-buttons"), note = $("start-note");
   btns.textContent = "";
   const button = (text, main, fn) => {
@@ -166,7 +223,32 @@ function showStart(kind, handle) {
     b.onclick = fn;
     btns.appendChild(b);
   };
-  if (kind === "again") {
+  if (kind === "doc") {
+    msg.textContent = `You were working on “${file}”.`;
+    button("Open it", true, async () => {
+      const r = await handle.requestPermission({ mode: "readwrite" });
+      if (/\.docx$/i.test(handle.name)) openWordDoc(handle, r !== "granted");
+      else openMdFile(handle, r !== "granted");
+    });
+    button("Open my notes instead", false, async () => {
+      S.settings.where = "notes";
+      saveSettings();
+      start();
+    });
+    note.textContent = "Android asks once each time Ross Note starts afresh.";
+  } else if (kind === "project") {
+    msg.textContent = `You were working on the Ross Writer project “${file.replace(/\.rwproj$/i, "")}”.`;
+    button("Open the project", true, async () => {
+      const r = await handle.requestPermission({ mode: "readwrite" });
+      if (r === "granted") openProject(handle, file);
+    });
+    button("Open my notes instead", false, async () => {
+      S.settings.where = "notes";
+      saveSettings();
+      start();
+    });
+    note.textContent = "Android asks once each time Ross Note starts afresh.";
+  } else if (kind === "again") {
     msg.textContent = `Your notes are in the folder “${handle.name}”.`;
     button("Open my notes", true, async () => {
       const r = await handle.requestPermission({ mode: "readwrite" });
@@ -187,6 +269,8 @@ function showStart(kind, handle) {
 async function chooseFolder() {
   try {
     const h = await window.showDirectoryPicker({ id: "rossnotes", mode: "readwrite" });
+    await flushSave();
+    if (await asProject(h)) return;       // a Ross Writer project, chosen as the notes folder: opened as one
     await kvSet("root", h);
     openRoot(h);
   } catch (e) {
@@ -194,9 +278,48 @@ async function chooseFolder() {
   }
 }
 
+// A folder holding a .rwproj is a Ross Writer project, whichever way it was chosen: it's opened as one
+// (never as the notes folder, where it would show only "Scenes"), and the notes made for its folders by
+// an earlier version opening it as notes ("Scenes.md" holding just "# Scenes") are taken away again.
+async function asProject(handle) {
+  let files = [];
+  try { files = await findProjectFiles(handle); } catch (e) { return false; }
+  if (!files.length) return false;
+  try {
+    const dirs = [];
+    for await (const [name, e] of handle.entries()) if (e.kind === "directory") dirs.push(name);
+    for (const d of dirs) {
+      try {
+        const f = await (await handle.getFileHandle(d + ".md")).getFile();
+        if ((await f.text()) === "# " + d + "\n") await handle.removeEntry(d + ".md");
+      } catch (e) { /* none */ }
+    }
+  } catch (e) { /* left as it is */ }
+  try {
+    const root = await kvGet("root");
+    if (root && root.isSameEntry && await root.isSameEntry(handle)) await kvSet("root", null);
+  } catch (e) { /* none */ }
+  let file = files[0];
+  if (files.length > 1) {
+    const q = document.createElement("div");
+    q.textContent = `“${handle.name}” holds ${files.length} Ross Writer projects. Which one?`;
+    const v = await ask("Open a Ross Writer Project", q, files.map((f, k) => [f.replace(/\.rwproj$/i, ""), f, k === 0]));
+    if (!v) return true;
+    file = v;
+  }
+  toast(`“${handle.name}” is a Ross Writer project: opening it as one.`, 6000);
+  await openProject(handle, file);
+  return true;
+}
+
 async function openRoot(handle, quiet) {
   $("start").hidden = true;
-  S.store = new Store(handle);
+  if (!quiet && await asProject(handle)) return;
+  const st = new Store(handle);
+  st.onWrite = wordSoon;
+  for (const p of P) { p.note = null; p.dirty = false; }
+  enterPlace(st);
+  S.store = st;
   await queue(async () => {
     await S.store.scan();
     if (!S.store.root.children.length) await makeWelcome();
@@ -211,6 +334,219 @@ async function openRoot(handle, quiet) {
   if (n) await openNote(n, P[0]);
   if (S.settings.split && S.settings.active === 1) setActive(P[1]);
   updateCount();
+}
+
+// ------------------------------------------------------------------ Ross Writer projects
+// A project folder (made by Ross Writer: <name>.rwproj and Scenes/) somewhere your sync app keeps;
+// its entries are edited here and saved back into their Word files (project.js)
+async function chooseProject() {
+  // the folder picker first, straight from the tap (Android allows it only then); saving after
+  if (!window.showDirectoryPicker) {
+    dialog("Open a Ross Writer Project", "This browser can't open folders on this device. Ross Note needs Chrome (version 132 or later on Android).");
+    return;
+  }
+  toast("Choose the project's folder: the one holding the .rwproj file…", 8000);
+  let h;
+  try { h = await window.showDirectoryPicker({ id: "rwproject", mode: "readwrite" }); } catch (e) {
+    if (e && e.name === "AbortError") toast("No folder chosen.");
+    else dialog("Open a Ross Writer Project", `The folder picker didn't open.\n\n${(e && e.name) || "Error"}: ${(e && e.message) || e}`);
+    return;
+  }
+  toast(`Looking in “${h.name}”…`, 8000);
+  let files;
+  try { files = await findProjectFiles(h); } catch (e) {
+    dialog("Open a Ross Writer Project", `Couldn't read the folder “${h.name}”.\n\n${(e && e.name) || "Error"}: ${(e && e.message) || e}`);
+    return;
+  }
+  if (!files.length) {
+    // what is there, so it's clear which folder this was
+    const seen = [];
+    try { for await (const [name, e] of h.entries()) { seen.push(e.kind === "directory" ? name + "/" : name); if (seen.length >= 25) break; } } catch (e) { /* none */ }
+    dialog("Open a Ross Writer Project", `There's no Ross Writer project (.rwproj file) in “${h.name}”.\n\n` +
+      (seen.length ? "This folder holds:\n" + seen.sort().map((x) => "  " + x).join("\n") : "This folder looks empty to Ross Note.") +
+      "\n\nChoose the project's own folder: the one holding the .rwproj file and the Scenes folder.");
+    return;
+  }
+  let file = files[0];
+  if (files.length > 1) {
+    const q = document.createElement("div");
+    q.textContent = `“${h.name}” holds ${files.length} projects. Which one?`;
+    const v = await ask("Open a Ross Writer Project", q, files.map((f, k) => [f.replace(/\.rwproj$/i, ""), f, k === 0]));
+    if (!v) return;
+    file = v;
+  }
+  await openProject(h, file);
+}
+
+async function openProject(handle, file) {
+  $("start").hidden = true;
+  toast("Opening the project…", 60000);
+  await flushSave();
+  const st = new ProjectStore(handle, file);
+  try { await queue(() => st.scan()); } catch (e) {
+    hideToast();
+    dialog("Open a Ross Writer Project", `Couldn't open “${file}”.\n\n${e.message || e}`);
+    if (!S.store) start();
+    return;
+  }
+  try { await kvSet("project", handle); await kvSet("projectFile", file); } catch (e) { /* kept for this visit only */ }
+  for (const p of P) { p.note = null; p.dirty = false; }
+  const fresh = !(S.settings.places || {})[placeId(st)];
+  enterPlace(st);
+  S.store = st;
+  // the first time: the branches open as Ross Writer had them
+  if (fresh) S.settings.expanded = st.all().filter((n) => n.children.length && n.raw.expanded !== false).map((n) => n.key());
+  renderTree();
+  layout();
+  const n = st.find(S.settings.open) || st.root.children[0];
+  if (S.settings.split) {
+    const n2 = st.find(S.settings.open2) || n;
+    if (n2) await openNote(n2, P[1]);
+  }
+  if (n) await openNote(n, P[0]);
+  else for (const p of P) { p.page.textContent = ""; p.page.contentEditable = "false"; }
+  if (S.settings.split && S.settings.active === 1) setActive(P[1]);
+  updateCount();
+  const ro = st.all().filter((x) => x.readOnly && !x.raw.pdf).length;
+  toast(`${st.label}: ${st.all().length} entr${st.all().length === 1 ? "y" : "ies"}` +
+    (ro ? ` (${ro} read-only here: comments, footnotes or the like)` : ""));
+}
+
+// ------------------------------------------------------------------ a Word document by itself
+// File ▸ Open a Word Document…: edited and commented in place, saved straight back into it (DocxStore)
+const DOC_RE = /\.(docx|md|markdown|mdown|mkd|txt)$/i;
+
+// File ▸ Open a Word Document or Note…: Android's file picker, showing every file (it often doesn't know a
+// synced .docx or .md for what it is, and would grey it out). Where that picker isn't there or won't
+// open: the folder picker (which works wherever RossNotes does), then the Word and Markdown files in it.
+async function chooseWordDoc() {
+  toast("Choose the Word document or Markdown note…", 8000);
+  let fh = null;
+  if (window.showOpenFilePicker) {
+    try {
+      [fh] = await window.showOpenFilePicker({ id: "worddoc", multiple: false });
+    } catch (e) {
+      if (e && e.name === "AbortError") { toast("No file chosen."); return; }
+      fh = null;      // the file picker can't: the folder way instead
+    }
+  }
+  if (!fh) fh = await chooseDocInFolder();
+  if (!fh) return;
+  await openDocFile(fh, true);
+}
+
+async function chooseDocInFolder() {
+  if (!window.showDirectoryPicker) {
+    dialog("Open a Word Document or Note", "This browser can't open files on this device for saving back into them. " +
+      "Use File ▸ Import a Word Document… instead (it becomes notes).");
+    return null;
+  }
+  let dir;
+  try { dir = await window.showDirectoryPicker({ id: "docfolder", mode: "readwrite" }); } catch (e) {
+    if (e && e.name === "AbortError") toast("No folder chosen.");
+    else dialog("Open a Word Document or Note", `The folder picker didn't open.\n\n${(e && e.name) || "Error"}: ${(e && e.message) || e}`);
+    return null;
+  }
+  const names = [];
+  try { for await (const [name, h] of dir.entries()) if (h.kind === "file" && DOC_RE.test(name) && !name.startsWith("~$")) names.push(name); } catch (e) { /* none */ }
+  names.sort((x, y) => x.localeCompare(y, undefined, { sensitivity: "base" }));
+  if (!names.length) {
+    dialog("Open a Word Document or Note", `There are no Word documents (.docx) or Markdown notes (.md) in “${dir.name}”.`);
+    return null;
+  }
+  const box = document.createElement("div");
+  box.className = "choose";
+  names.forEach((n, k) => {
+    const l = document.createElement("label");
+    l.innerHTML = `<input type="radio" name="docpick" value="${k}"${k === 0 ? " checked" : ""}> `;
+    l.append(n);
+    box.appendChild(l);
+  });
+  const v = await ask(`Open from “${dir.name}”`, box, [["Open", "go", true]]);
+  if (!v) return null;
+  const k = +box.querySelector('input[name="docpick"]:checked').value;
+  return dir.getFileHandle(names[k]);
+}
+
+async function openDocFile(fh, ask = false) {
+  if (!DOC_RE.test(fh.name)) {
+    dialog("Open a Word Document or Note", `“${fh.name}” isn't a Word document (.docx) or a Markdown note (.md). ` +
+      "Older .doc files: save them as .docx in Word or LibreOffice first.");
+    return;
+  }
+  let ro = false;
+  if (ask) {
+    try {
+      const r = fh.requestPermission ? await fh.requestPermission({ mode: "readwrite" }) : "granted";
+      ro = r !== "granted";
+    } catch (e) { ro = true; }
+  }
+  if (/\.docx$/i.test(fh.name)) await openWordDoc(fh, ro);
+  else await openMdFile(fh, ro);
+}
+
+async function openMdFile(fh, readOnly = false) {
+  $("start").hidden = true;
+  toast("Opening the note…", 60000);
+  await flushSave();
+  const st = new MdFileStore(fh);
+  st.canWrite = !readOnly;
+  try { await queue(() => st.scan()); } catch (e) {
+    hideToast();
+    dialog("Open a Note", `Couldn't open “${fh.name}”.\n\n${(e && e.message) || e}`);
+    if (!S.store) start();
+    return;
+  }
+  try { await kvSet("docFile", fh); } catch (e) { /* kept for this visit only */ }
+  for (const p of P) { p.note = null; p.dirty = false; }
+  enterPlace(st);
+  S.store = st;
+  renderTree();
+  layout();
+  const n = st.root.children[0];
+  if (S.settings.split) await openNote(n, P[1]);
+  await openNote(n, P[0]);
+  updateCount();
+  toast(fh.name + (n.readOnly ? " (read-only: " + n.readOnly.join(", ") + ")" : ""));
+}
+
+async function openWordDoc(fh, readOnly = false) {
+  $("start").hidden = true;
+  toast("Opening the document…", 60000);
+  await flushSave();
+  const st = new DocxStore(fh);
+  st.canWrite = !readOnly;
+  try { await queue(() => st.scan()); } catch (e) {
+    hideToast();
+    dialog("Open a Word Document", `Couldn't open “${fh.name}”.\n\n${(e && e.message) || e}`);
+    if (!S.store) start();
+    return;
+  }
+  try { await kvSet("docFile", fh); } catch (e) { /* kept for this visit only */ }
+  for (const p of P) { p.note = null; p.dirty = false; }
+  enterPlace(st);
+  S.store = st;
+  renderTree();
+  layout();
+  const n = st.root.children[0];
+  if (S.settings.split) await openNote(n, P[1]);
+  await openNote(n, P[0]);
+  updateCount();
+  const cs = n.comments ? n.comments.length : 0;
+  toast(`${fh.name}${n.readOnly ? " (read-only: " + n.readOnly.join(", ") + ")" : ""}${cs ? ` · ${cs} comment${cs === 1 ? "" : "s"}` : ""}`);
+}
+
+async function backToNotes() {
+  await flushSave();
+  let h = null;
+  try { h = await kvGet("root"); } catch (e) { /* none */ }
+  if (h && h.kind === "directory") {
+    const mode = h.queryPermission ? await h.queryPermission({ mode: "readwrite" }) : "granted";
+    if (mode === "granted" || (await h.requestPermission({ mode: "readwrite" })) === "granted") return openRoot(h);
+  }
+  S.settings.where = "notes";
+  saveSettings();
+  chooseFolder();
 }
 
 // ------------------------------------------------------------------ the list of notes
@@ -232,6 +568,19 @@ function renderTree() {
     lbl.className = "lbl";
     lbl.textContent = note.title();
     row.append(tw, lbl);
+    if (note.flag && FLAG_COLOURS[note.flag()]) {
+      const f = document.createElement("span");
+      f.className = "flag";
+      f.style.background = FLAG_COLOURS[note.flag()];
+      row.insertBefore(f, lbl);
+    }
+    if (note.readOnly) {
+      const ro = document.createElement("span");
+      ro.className = "ro";
+      ro.textContent = "read-only";
+      ro.title = `Has ${note.readOnly.join(", ")}: edit it in Ross Writer`;
+      row.appendChild(ro);
+    }
     tw.onclick = (e) => {
       e.stopPropagation();
       if (!note.children.length) return openNote(note);
@@ -262,7 +611,11 @@ function renderTree() {
 
 function updateCount() {
   const n = S.store ? S.store.all().length : 0;
-  $("count").textContent = `${n} note${n === 1 ? "" : "s"} · ${S.store ? S.store.handle.name : ""}`;
+  const proj = S.store && S.store.isProject;
+  $("count").textContent = S.store && S.store.isDoc ? `${S.store.isMd ? "Note" : "Word"}: ${S.store.label} · Ross Note ${VERSION}` :
+    `${n} ${proj ? (n === 1 ? "entry" : "entries") : n === 1 ? "note" : "notes"} · ` +
+    `${S.store ? (proj ? "Ross Writer: " + S.store.label : S.store.handle.name) : ""} · Ross Note ${VERSION}`;
+  document.body.classList.toggle("in-project", !!proj);
 }
 
 function expandTo(note) {
@@ -274,8 +627,266 @@ function expandTo(note) {
 function updateHead() {
   for (const p of P) {
     const n = p.note;
-    p.head.textContent = n ? [...n.ancestors().reverse().map((a) => a.title()), titleNow(p.page)].join("  ›  ") : "No note open";
+    p.hname.textContent = n ? [...n.ancestors().reverse().map((a) => a.title()), titleNow(p.page)].join("  ›  ") +
+      (n.readOnly ? `  (read-only: it has ${n.readOnly.join(", ")}; edit it in Ross Writer)` : "") : "No note open";
   }
+  wordsSoon();
+  renderComments();
+}
+
+// ------------------------------------------------------------------ Word comments (Ross Writer scenes)
+// The scene's comments listed beside the page: who, when, the words they're on, what they say. They're
+// kept in the Word file as you edit (wordpatch.js); here they're read only. Tap one to go to its words.
+function toggleComments() {
+  S.settings.showComments = !S.settings.showComments;
+  saveSettings();
+  renderComments();
+}
+
+function commentDate(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+const shownComments = new WeakMap();
+function renderComments() {
+  for (const p of P) {
+    const cs = (p.note && p.note.comments) || [];
+    const open = cs.filter((c) => !c.done).length;
+    p.hcomments.hidden = !cs.length;
+    p.hcomments.textContent = cs.length ? `${cs.length} comment${cs.length === 1 ? "" : "s"}${open < cs.length ? ` (${cs.length - open} resolved)` : ""}` : "";
+    p.hcomments.classList.toggle("on", !!S.settings.showComments);
+    p.hcomments.title = S.settings.showComments ? "Hide the comments" : "Show the comments";
+    const show = !!S.settings.showComments && cs.length > 0 && !p.el.hidden;
+    p.cpanel.hidden = !show;
+    p.el.classList.toggle("cbelow", p.el.clientWidth < 760);
+    if (!show) continue;
+    const key = JSON.stringify(cs);
+    if (shownComments.get(p.cpanel) === key) continue;
+    shownComments.set(p.cpanel, key);
+    p.cpanel.textContent = "";
+    const top = document.createElement("div");
+    top.className = "ctop";
+    top.textContent = "Comments";
+    const x = document.createElement("button");
+    x.type = "button";
+    x.textContent = "✕";
+    x.title = "Hide the comments";
+    x.onclick = toggleComments;
+    top.appendChild(x);
+    p.cpanel.appendChild(top);
+    const replies = (id) => cs.filter((c) => c.parent === id);
+    const item = (c, reply) => {
+      const it = document.createElement("div");
+      it.className = "citem" + (reply ? " reply" : "") + (c.done ? " done" : "");
+      const who = document.createElement("div");
+      who.className = "cwho";
+      who.textContent = [c.author || "Someone", commentDate(c.date), c.done ? "resolved" : ""].filter(Boolean).join(" · ");
+      it.appendChild(who);
+      if (c.words && !reply) {
+        const q = document.createElement("div");
+        q.className = "cwords";
+        q.textContent = "“" + (c.words.length > 140 ? c.words.slice(0, 140) + "…" : c.words) + "”";
+        it.appendChild(q);
+      }
+      const t = document.createElement("div");
+      t.className = "ctext";
+      t.textContent = c.text;
+      it.appendChild(t);
+      const acts = document.createElement("div");
+      acts.className = "cacts";
+      const act = (label, fn) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = label;
+        b.onclick = (e) => { e.stopPropagation(); fn(); };
+        acts.appendChild(b);
+      };
+      act("Reply", () => commentAction(p, c, "reply"));
+      act("Edit", () => commentAction(p, c, "edit"));
+      if (!reply) act(c.done ? "Reopen" : "Resolve", () => commentAction(p, c, "resolve"));
+      act("Delete", () => commentAction(p, c, "delete"));
+      it.appendChild(acts);
+      it.onclick = () => goToWords(p, c.words || (cs.find((o) => o.id === c.parent) || {}).words || "");
+      p.cpanel.appendChild(it);
+      for (const r of replies(c.id)) item(r, true);
+    };
+    for (const c of cs) if (!c.parent || !cs.some((o) => o.id === c.parent)) item(c, false);
+  }
+}
+
+// your name on comments (asked the first time; Insert ▸ Your Name for Comments… to change it)
+async function askAuthor(force) {
+  const s = S.settings;
+  if (s.commentAuthor && !force) return { author: s.commentAuthor, initials: s.commentInitials || "" };
+  const box = document.createElement("div");
+  box.className = "cform";
+  box.innerHTML = '<label>Your name, as comments show it<input type="text" class="cname"></label>' +
+    '<label>Initials<input type="text" class="cinit" maxlength="6"></label>';
+  const nameIn = box.querySelector(".cname"), initIn = box.querySelector(".cinit");
+  nameIn.value = s.commentAuthor || "";
+  initIn.value = s.commentInitials || "";
+  nameIn.addEventListener("input", () => {
+    if (!initIn.dataset.touched) initIn.value = nameIn.value.split(/\s+/).filter(Boolean).map((w) => w[0].toUpperCase()).join("").slice(0, 4);
+  });
+  initIn.addEventListener("input", () => { initIn.dataset.touched = "1"; });
+  setTimeout(() => nameIn.focus(), 50);
+  const v = await ask("Your Name for Comments", box, [["OK", "ok", true]]);
+  if (!v || !nameIn.value.trim()) return null;
+  s.commentAuthor = nameIn.value.trim();
+  s.commentInitials = initIn.value.trim();
+  saveSettings();
+  return { author: s.commentAuthor, initials: s.commentInitials };
+}
+
+// a comment's words, typed in a box
+async function commentText(title, quoted, start = "", button = "OK") {
+  const box = document.createElement("div");
+  box.className = "cform";
+  if (quoted) {
+    const q = document.createElement("div");
+    q.className = "cquote";
+    q.textContent = "“" + (quoted.length > 160 ? quoted.slice(0, 160) + "…" : quoted) + "”";
+    box.appendChild(q);
+  }
+  const ta = document.createElement("textarea");
+  ta.rows = 5;
+  ta.value = start;
+  ta.spellcheck = true;
+  box.appendChild(ta);
+  setTimeout(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }, 50);
+  const v = await ask(title, box, [[button, "ok", true]]);
+  return v ? ta.value.replace(/\s+$/, "") : null;
+}
+
+// Insert ▸ Comment (Ctrl+Alt+M): on the words selected (or the word at the caret)
+async function addComment() {
+  const p = A;
+  const n = p.note;
+  if (!n || !S.store || !S.store.isProject || !n.comments) {
+    toast("Comments are for Ross Writer scenes and Word documents.");
+    return;
+  }
+  let c = ed.caret(p.page);
+  if (!c) { toast("Select the words the comment is on first."); return; }
+  if (c.a.line === c.b.line && c.a.pos === c.b.pos) {
+    // no selection: the word at the caret
+    const t = ed.lineText(p.page.children[c.a.line]);
+    let a = c.a.pos, b = c.a.pos;
+    while (a > 0 && /[\p{L}\p{N}'’-]/u.test(t[a - 1])) a--;
+    while (b < t.length && /[\p{L}\p{N}'’-]/u.test(t[b])) b++;
+    if (a === b) { toast("Select the words the comment is on first."); return; }
+    c = { a: { line: c.a.line, pos: a }, b: { line: c.a.line, pos: b } };
+  }
+  const lines = [...p.page.children].map((d) => ed.lineText(d));
+  const words = lines.slice(c.a.line, c.b.line + 1).map((t, k, arr) =>
+    t.slice(k === 0 ? c.a.pos : 0, k === arr.length - 1 ? c.b.pos : undefined)).join(" ").trim();
+  const who = await askAuthor(false);
+  if (!who) return;
+  const text = await commentText("New Comment", words, "", "Add");
+  if (text == null || !text.trim()) return;
+  await flushSave();
+  try {
+    await queue(() => S.store.commentOp(n, { kind: "add", a: c.a, b: c.b, pageLines: [...p.page.children].map((d) => ed.lineText(d)), text, ...who }));
+  } catch (e) { dialog("New Comment", (e && e.message) || String(e)); return; }
+  S.settings.showComments = true;
+  saveSettings();
+  renderComments();
+  toast("Comment added.");
+}
+
+async function commentAction(p, c, kind) {
+  const n = p.note;
+  if (!n) return;
+  let op = { kind, id: c.id };
+  if (kind === "reply" || kind === "edit") {
+    const who = kind === "reply" ? await askAuthor(false) : {};
+    if (!who) return;
+    const text = await commentText(kind === "reply" ? "Reply" : "Edit Comment", c.words, kind === "edit" ? c.text : "",
+      kind === "reply" ? "Reply" : "Save");
+    if (text == null || (kind === "reply" && !text.trim())) return;
+    op = { ...op, text, ...who };
+  } else if (kind === "resolve") op.done = !c.done;
+  else if (kind === "delete") {
+    const replies = (n.comments || []).filter((x) => x.parent === c.id).length;
+    if (!confirm(`Delete ${c.author ? c.author + "’s" : "this"} comment${replies ? ` and its ${replies} repl${replies === 1 ? "y" : "ies"}` : ""}?`)) return;
+  }
+  await flushSave();
+  try { await queue(() => S.store.commentOp(n, op)); } catch (e) { dialog("Comments", (e && e.message) || String(e)); return; }
+  renderComments();
+  toast({ reply: "Reply added.", edit: "Comment changed.", resolve: op.done ? "Resolved." : "Reopened.", delete: "Comment deleted." }[kind]);
+}
+
+// the words a comment is on, found in the page, selected and scrolled to
+function goToWords(p, words) {
+  const want = (words || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!want) return;
+  const lines = [...p.page.children];
+  const starts = [];
+  let at = 0;
+  const text = lines.map((d) => { const t = ed.lineText(d); starts.push(at); at += t.length + 1; return t; }).join(" ");
+  const k = text.replace(/\s/g, " ").indexOf(want);
+  if (k < 0) { toast("Those words aren't in the page any more."); return; }
+  const where = (off) => {
+    let i = 0;
+    while (i + 1 < starts.length && starts[i + 1] <= off) i++;
+    return ed.pointAt(lines[i], off - starts[i]);
+  };
+  const r = document.createRange();
+  r.setStart(...where(k));
+  r.setEnd(...where(k + want.length));
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+  const div = r.startContainer.nodeType === 1 ? r.startContainer : r.startContainer.parentElement;
+  const line = div && div.closest(".ln");
+  if (line) line.scrollIntoView({ block: "center" });
+}
+
+// ------------------------------------------------------------------ word count (as the laptop counts)
+// letters and digits, with ' ’ or - inside a word (don't, well-known) as one word
+const WORD_RE = /[\p{L}\p{N}]+(?:['\u2019-][\p{L}\p{N}]+)*/gu;
+function wordsIn(text) { return (text.match(WORD_RE) || []).length; }
+
+function pageWords(pg) {
+  return [...pg.children].map((d) => ed.lineText(d)).join("\n").split(md.OBJ).join("").split("\u200b").join("");
+}
+
+let wordsTimer = 0;
+function wordsSoon() { clearTimeout(wordsTimer); wordsTimer = setTimeout(countWords, 300); }
+
+function countWords() {
+  for (const p of P) {
+    if (!p.note) { p.hwords.textContent = ""; continue; }
+    const text = pageWords(p.page);
+    const n = wordsIn(text);
+    let msg = `${n.toLocaleString("en")} word${n === 1 ? "" : "s"} · ${text.replace(/\n/g, "").length.toLocaleString("en")} characters`;
+    const sel = window.getSelection();
+    if (sel.rangeCount && !sel.isCollapsed && p.page.contains(sel.anchorNode)) {
+      const t = sel.toString().split(md.OBJ).join("").split("\u200b").join("");
+      if (t.trim()) msg = `${wordsIn(t).toLocaleString("en")} of ${n.toLocaleString("en")} words`;
+    }
+    p.hwords.textContent = msg;
+  }
+}
+
+// the words in a note (or the selected notes) and every note under it
+async function countBranch() {
+  const n = S.note;
+  if (!n) return null;
+  await flushSave();
+  let total = 0, k = 0;
+  await queue(async () => {
+    for (const x of [n, ...n.walk()]) {
+      let text = x.text;
+      try { text = await S.store.read(x); } catch (e) { /* as we had it */ }
+      const t = md.parse(text || "").map((ln) => ln.runs.map((r) => (r.img ? "" : r.t)).join("")).join("\n");
+      total += wordsIn(t.split(md.OBJ).join(""));
+      k++;
+    }
+  });
+  alert(`“${n.title()}”${k > 1 ? ` and the ${k - 1} note${k === 2 ? "" : "s"} under it` : ""}:\n\n${total.toLocaleString("en")} words`);
+  return total;
 }
 
 function titleNow(pg = page) {
@@ -309,6 +920,8 @@ function showText(text, pane = A) {
   for (const ln of lines) for (const r of ln.runs) if (r.img) r.img.target = md.resolvePicture(r.img.src, dir);
   ed.renderLines(pane.page, lines);
   ed.relayout(pane.page);
+  pane.page.contentEditable = pane.note.readOnly ? "false" : "true";
+  pane.el.classList.toggle("readonly", !!pane.note.readOnly);
   loadPictures(pane.page);
   pane.page.dataset.loaded = "1";
 }
@@ -346,7 +959,7 @@ function sizePicture(img) {
 
 // ------------------------------------------------------------------ saving
 function changed(pane = A) {
-  if (!pane.note) return;
+  if (!pane.note || pane.note.readOnly) return;
   pane.dirty = true;
   clearTimeout(pane.timer);
   pane.timer = setTimeout(() => queue(() => saveNow(pane)), SAVE_AFTER_MS);
@@ -391,6 +1004,7 @@ function flushSave() {
 
 async function saveNow(pane) {
   if (!pane.dirty || !pane.note) return;
+  if (pane.note.readOnly) { pane.dirty = false; return; }
   pane.dirty = false;
   const note = pane.note;
   const lines = ed.readLines(pane.page);
@@ -400,11 +1014,14 @@ async function saveNow(pane) {
     if (now && now.modified !== note.modified && now.text !== note.text && now.text !== text) {
       // changed on the laptop too since we read it: theirs is kept, not lost
       await S.store.keepConflict(note, now.text);
-      toast("This note had also changed on another device; that version is kept in the .trash folder.");
+      toast(S.store.isProject ? "This scene had also changed on another device; that version is kept in the project's Trash folder."
+        : "This note had also changed on another device; that version is kept in the .trash folder.");
     }
     await S.store.write(note, text);
     // the same note open in the other pane shows what was just saved
     for (const q of P) if (q !== pane && q.note === note && !q.dirty) refill(q);
+    // a scene's comments as the saved file has them now (one on deleted words is gone)
+    if (note.comments) renderComments();
   }
   const title = md.titleOfLines(lines) || "Untitled";
   if (md.safeName(title) !== note.name) {
@@ -464,13 +1081,14 @@ async function refresh() {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") flushSave();
+  if (document.visibilityState === "hidden") flushSave().then(() => setTimeout(() => { if (wordDue.size) wordFlush(); }, 50));
   else refresh();
 });
 window.addEventListener("pagehide", () => flushSave());
 
 // ------------------------------------------------------------------ notes: new, move, delete
 async function newNote(under) {
+  if (S.store && S.store.isDoc) { toast("A Word document opened by itself is one page. File ▸ Back to My Notes for notes."); return; }
   await flushSave();
   const cur = S.note;
   let note;
@@ -487,6 +1105,7 @@ async function newNote(under) {
 }
 
 async function moveNote(how) {
+  if (S.store && S.store.isDoc) { toast("A Word document opened by itself is one page. File ▸ Back to My Notes for notes."); return; }
   const n = S.note;
   if (!n) return;
   await flushSave();
@@ -522,10 +1141,13 @@ async function moveNote(how) {
 }
 
 async function deleteNote() {
+  if (S.store && S.store.isDoc) { toast("A Word document opened by itself is one page. File ▸ Back to My Notes for notes."); return; }
   const n = S.note;
   if (!n) return;
   const under = [...n.walk()].length;
-  if (!confirm(`Delete “${n.title()}”${under ? ` and the ${under} note${under === 1 ? "" : "s"} under it` : ""}?\n\nIt goes to the .trash folder inside RossNotes, in case.`)) return;
+  const proj = S.store.isProject;
+  if (!confirm(`Delete “${n.title()}”${under ? ` and the ${under} ${proj ? "entr" + (under === 1 ? "y" : "ies") : "note" + (under === 1 ? "" : "s")} under it` : ""}?\n\n` +
+    (proj ? "Its Word file goes to the project's Trash folder, as in Ross Writer." : "It goes to the .trash folder inside RossNotes, in case."))) return;
   await flushSave();
   const parent = n.parent, i = parent.children.indexOf(n);
   const gone = [n, ...n.walk()];
@@ -669,11 +1291,14 @@ const COMMANDS = {
   date: () => insertText(md.longDate()),
   datetime: () => insertText(md.longDate(true)),
   picture: () => { rememberCaret(); $("file-pic").click(); },
-  undo: () => { exec("undo"); afterEdit(); },
+  undo: () => { if (!undoReplaceAll()) { exec("undo"); afterEdit(); } },
+  find: () => openFind(true),
+  headings: () => showHeadings(),
   redo: () => { exec("redo"); afterEdit(); },
   smaller: () => setSize(-1), bigger: () => setSize(1),
   dark: () => { S.settings.dark = !S.settings.dark; saveSettings(); applyLook(); },
   print: () => printNote(),
+  share: () => shareNote(),
   splith: () => setSplit("h"),
   splitv: () => setSplit("v"),
   clear: clearFormatting,
@@ -891,7 +1516,8 @@ document.addEventListener("keydown", (e) => {
   const c = e.ctrlKey || e.metaKey;
   const k = e.key;
   let fn = null;
-  if (c && e.shiftKey && (k === "H" || k === "h")) fn = COMMANDS.highlight;
+  if (c && e.altKey && !e.shiftKey && (k === "m" || k === "M" || e.code === "KeyM")) fn = addComment;
+  else if (c && e.shiftKey && (k === "H" || k === "h")) fn = COMMANDS.highlight;
   else if (c && e.shiftKey && (k === "X" || k === "x")) fn = COMMANDS.strike;
   else if (c && e.shiftKey && (k === "N" || k === "n")) fn = COMMANDS.normal;
   else if (c && e.shiftKey && (k === "*" || e.code === "Digit8")) fn = COMMANDS.ul;
@@ -907,6 +1533,11 @@ document.addEventListener("keydown", (e) => {
   else if (c && k === "0") fn = () => setSize(0);
   else if (c && (k === "p" || k === "P")) fn = printNote;
   else if (c && e.shiftKey && (k === "F" || k === "f")) fn = focusSearch;
+  else if (c && e.shiftKey && (k === "O" || k === "o")) fn = showHeadings;
+  else if (c && !e.shiftKey && (k === "f" || k === "F")) fn = () => openFind(false);
+  else if (c && !e.shiftKey && (k === "h" || k === "H")) fn = () => openFind(true);
+  else if (k === "F3") fn = () => findGo(e.shiftKey);
+  else if (k === "Escape" && !$("findbar").hidden && !openMenu && $("dialog").hidden) fn = closeFind;
   else if (c && e.altKey && (k === "n" || k === "N")) fn = () => newNote(false);
   else if (c && (k === "\\" || k === "|" || e.code === "Backslash")) fn = e.shiftKey ? COMMANDS.splitv : COMMANDS.splith;
   else if (c && (k === "b" || k === "B" || k === "i" || k === "I" || k === "u" || k === "U") && document.activeElement === page) {
@@ -1098,6 +1729,7 @@ onPages("click", (e) => {
 
 document.addEventListener("selectionchange", () => {
   if (!S.note) return;
+  wordsSoon();
   updateButtons();
   const sel = window.getSelection();
   if (!sel.rangeCount) return;
@@ -1163,14 +1795,27 @@ function menuItems(name) {
       { label: "New Note Under This One", fn: () => newNote(true), off: !n },
       "-",
       { label: "Import a Word Document…", fn: () => $("file-docx").click() },
+      { label: "Import a Notebook (NoteCase Pro, FeatherNotes)…", fn: () => $("file-book").click() },
       { label: "Export as Word…", fn: () => exportNotes("word"), off: !n },
       { label: "Export as PDF…", fn: () => exportNotes("pdf"), off: !n },
       { label: "Export as Markdown…", fn: () => exportNotes("md"), off: !n },
       "-",
+      { label: "Email or Share This Note…", fn: () => shareNote(), off: !n },
+      { label: "Copy This Note for Email", fn: () => copyForEmail(), off: !n },
+      "-",
+      { label: "Update Word Copy", fn: () => updateWordCopy(), off: !n || !!(S.store && S.store.isProject) },
+      { label: "Keep Word Copies Updated", on: s.wordAuto !== false, off: !!(S.store && S.store.isProject), fn: () => {
+        s.wordAuto = s.wordAuto === false; saveSettings();
+        toast(s.wordAuto ? "A note's Word copy is written again each time the note is saved." : "Word copies are written only when you choose Update Word Copy.");
+      } },
+      "-",
       { label: "Print This Note…", fn: printNote, keys: "Ctrl+P", off: !n },
       "-",
-      { label: "Read the Folder Again", fn: refresh },
-      { label: "Choose Another Folder…", fn: async () => { await flushSave(); chooseFolder(); } },
+      { label: "Open a Word Document or Note…", fn: chooseWordDoc, off: !window.showOpenFilePicker && !window.showDirectoryPicker },
+      { label: "Open a Ross Writer Project…", fn: chooseProject, off: !window.showDirectoryPicker },
+      ...(S.store && S.store.isProject ? [{ label: "Back to My Notes (RossNotes)", fn: backToNotes }] : []),
+      { label: S.store && S.store.isProject ? "Read the Project Again" : "Read the Folder Again", fn: refresh },
+      { label: "Choose Another Folder…", fn: chooseFolder },
       "-",
       { label: "Delete Note…", fn: deleteNote, off: !n },
     ];
@@ -1183,6 +1828,11 @@ function menuItems(name) {
       { label: "Paste", fn: pasteFromMenu, keys: "Ctrl+V" },
       { label: "Select All", fn: () => { page.focus(); document.execCommand("selectAll"); }, keys: "Ctrl+A" },
       "-",
+      { label: "Find in This Note…", fn: () => openFind(false), keys: "Ctrl+F" },
+      { label: "Find and Replace…", fn: () => openFind(true), keys: "Ctrl+H" },
+      { label: "Find Next", fn: () => findGo(false), keys: "F3" },
+      { label: "Find Previous", fn: () => findGo(true), keys: "Shift+F3" },
+      "-",
       { label: "Search the Notes", fn: focusSearch, keys: "Ctrl+Shift+F" },
     ];
     case "insert": return [
@@ -1190,6 +1840,9 @@ function menuItems(name) {
       { label: "Date and Time", fn: COMMANDS.datetime, keys: "Ctrl+Shift+;" },
       "-",
       { label: "Picture…", fn: COMMANDS.picture },
+      "-",
+      { label: "Comment…", fn: addComment, keys: "Ctrl+Alt+M", off: !(A.note && A.note.comments) },
+      { label: "Your Name for Comments…", fn: () => askAuthor(true) },
       { label: "Keep Photos at Full Size", on: s.keepFull, fn: () => {
         s.keepFull = !s.keepFull; saveSettings();
         toast(s.keepFull ? "New photos are kept exactly as they come." : "Photos larger than 2,000 pixels are stored reduced to 2,000.");
@@ -1215,6 +1868,7 @@ function menuItems(name) {
     ];
     case "notes": return [
       { label: "New Note", fn: () => newNote(false), keys: "Ctrl+Alt+N" },
+      { label: "Count Words (with the notes under it)…", fn: countBranch, off: !n },
       { label: "New Note Under This One", fn: () => newNote(true), off: !n },
       "-",
       { label: "Move Up", fn: () => moveNote("up"), keys: "Alt+Up", off: i < 1 },
@@ -1225,6 +1879,9 @@ function menuItems(name) {
       { label: "Delete Note…", fn: deleteNote, off: !n },
     ];
     case "view": return [
+      { label: "Headings in This Note…", fn: showHeadings, keys: "Ctrl+Shift+O" },
+      { label: "Show Comments", on: !!s.showComments, fn: toggleComments, off: !(A.note && A.note.comments && A.note.comments.length) },
+      "-",
       { label: "Split Side by Side", on: s.split === "h", fn: COMMANDS.splith, keys: "Ctrl+\\" },
       { label: "Split Top and Bottom", on: s.split === "v", fn: COMMANDS.splitv, keys: "Ctrl+Shift+\\" },
       { label: "One Note Only", on: !s.split, fn: () => setSplit("") },
@@ -1352,6 +2009,12 @@ function showKeys() {
     "Split side by side: Ctrl+\\    Top and bottom: Ctrl+Shift+\\",
     "Hide / show the note list: Ctrl+Shift+L    Light / dark: Ctrl+Shift+D",
     "Search the notes: Ctrl+Shift+F",
+    "Ross Writer projects: File ▸ Open a Ross Writer Project (scenes saved back into their Word files)",
+    "Comments in a Ross Writer scene or Word document: tap “N comments” in the name bar (View ▸ Show Comments); tap one to go to its words",
+    "New comment: select the words, Insert ▸ Comment (Ctrl+Alt+M); Reply, Edit, Resolve, Delete in the list",
+    "Open a Word document or a Markdown note and save straight back into it: File ▸ Open a Word Document or Note",
+    "Find: ^p a line's end, ^t a tab    Word count: in the name bar",
+    "Word copy (RossNotes/Word Copies, kept up to date): File ▸ Update Word Copy",
     "Move a note: Alt+Up / Down / Left / Right",
     "Print or save as PDF: Ctrl+P",
     "Menus: Alt+F, Alt+E, Alt+I, Alt+O, Alt+N, Alt+V, Alt+H",
@@ -1443,7 +2106,7 @@ function hideToast() { $("toast").hidden = true; }
 
 // ------------------------------------------------------------------ Word in; Word, PDF and Markdown out
 let wordio = null;
-async function wordModule() { return wordio || (wordio = await import("./wordio.js")); }
+async function wordModule() { return wordio || (wordio = await import("./wordio.js?v=2.1.2")); }
 
 $("file-docx").addEventListener("change", async (e) => {
   const f = e.target.files[0];
@@ -1452,6 +2115,7 @@ $("file-docx").addEventListener("change", async (e) => {
 });
 
 async function importWord(file, split = null) {
+  if (S.store && S.store.isDoc) { toast("A Word document opened by itself is one page. File ▸ Back to My Notes for notes."); return; }
   await flushSave();
   const W = await wordModule();
   let got;
@@ -1461,13 +2125,22 @@ async function importWord(file, split = null) {
   }
   const stem = file.name.replace(/\.[^.]+$/, "");
   const { pre, secs } = W.splitSections(got.lines);
+  const proj = !!S.store.isProject;
+  // in a project, as Ross Writer does it: the top headings chapters, the ones under them scenes
+  const subOf = (sec) => W.splitSections(sec.slice(1));
+  const nested = proj && secs.some((sec) => subOf(sec).secs.length);
   if (split == null) {
     split = false;
-    if (secs.length > 1) {
+    if (secs.length > 1 || nested) {
       const p = document.createElement("div");
-      p.textContent = `“${stem}” has ${secs.length} headings. Bring it in as one note, or as a note for each heading ` +
-        "(under a note named after the document)?";
-      const v = await ask("Import a Word Document", p, [["One note", "one", true], ["A note for each heading", "many"]]);
+      p.textContent = proj
+        ? `“${stem}” has ${secs.length} chapter heading${secs.length === 1 ? "" : "s"}. Bring it in as one entry, or as ` +
+          "a chapter for each top heading with a scene for each heading under it (after this entry)?"
+        : `“${stem}” has ${secs.length} headings. Bring it in as one note, or as a note for each heading ` +
+          "(under a note named after the document)?";
+      const v = await ask("Import a Word Document", p, proj
+        ? [["One entry", "one", true], ["Chapters and scenes", "many"]]
+        : [["One note", "one", true], ["A note for each heading", "many"]]);
       if (!v) return null;
       split = v === "many";
     }
@@ -1502,7 +2175,21 @@ async function importWord(file, split = null) {
   };
   await queue(async () => {
     if (!split) top = await make(parent, index, startsWithTitle(got.lines) ? got.lines : [titleLine, ...got.lines]);
-    else {
+    else if (proj) {
+      let at = index;
+      const hasText = (ls) => ls.some((ln) => ln.runs.some((r) => r.img || r.t.trim()));
+      if (hasText(pre)) {
+        const opening = { kind: null, depth: 1, code: false, runs: [{ t: "Opening", f: new Set() }] };
+        top = await make(parent, at++, pre.length && pre[0].title ? pre : [opening, ...pre]);
+      }
+      for (const sec of secs) {
+        const sub = subOf(sec);
+        const ch = await make(parent, at++, [sec[0], ...(sub.secs.length ? sub.pre : sec.slice(1))]);
+        if (!top) top = ch;
+        for (const s2 of sub.secs) await make(ch, ch.children.length, s2);
+        if (sub.secs.length) S.settings.expanded = [...new Set([...S.settings.expanded, ch.key()])];
+      }
+    } else {
       top = await make(parent, index, pre.length && pre[0].title ? pre : [titleLine, ...pre]);
       for (const sec of secs) await make(top, top.children.length, sec);
     }
@@ -1514,8 +2201,87 @@ async function importWord(file, split = null) {
   return top;
 }
 
+// ------------------------------------------------------------------ notebooks from other programs
+$("file-book").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (f) await importNotebook(f);
+});
+
+async function importNotebook(file) {
+  if (S.store && S.store.isDoc) { toast("A Word document opened by itself is one page. File ▸ Back to My Notes for notes."); return; }
+  await flushSave();
+  const NB = await import("./notebooks.js?v=2.1.2");
+  const W = await wordModule();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const kind = NB.kindOf(bytes);
+  let got;
+  toast("Reading " + file.name + "…", 60000);
+  try {
+    if (kind === "ncdb") got = await NB.readNcdb(bytes);
+    else if (kind === "fnx") got = NB.readFnx(new TextDecoder().decode(bytes));
+    else throw new Error("it isn't a NoteCase Pro or FeatherNotes notebook");
+  } catch (err) {
+    hideToast();
+    dialog("Import a Notebook", `Couldn't import “${file.name}”: ${err.message || err}`);
+    return null;
+  }
+  const stem = file.name.replace(/\.[^.]+$/, "");
+  const saved = new Map();
+  const typeOf = (b) => (b[0] === 0x89 ? "image/png" : b[0] === 0x47 ? "image/gif" : b[0] === 0x42 ? "image/bmp"
+    : b[0] === 0x52 && b[8] === 0x57 ? "image/webp" : "image/jpeg");
+  const savePic = async (data, name) => {
+    // named for what the picture really is (as the laptop does)
+    const ext = { "image/png": "png", "image/gif": "gif", "image/bmp": "bmp", "image/webp": "webp" }[typeOf(data)] || "jpg";
+    name = name.replace(/\.[^.]+$/, "") + "." + ext;
+    const [blob, nm] = await preparePicture(new File([data], name, { type: typeOf(data) }));
+    return S.store.savePicture(blob, nm);
+  };
+  const stamp = () => pictureStamp();
+  // pictures carried inside a page (data: addresses)
+  const pagePicture = async (src) => {
+    if (!src.startsWith("data:")) return null;
+    try {
+      const [head, b64] = src.split(",", 2);
+      const data = head.includes(";base64") ? Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+        : new TextEncoder().encode(decodeURIComponent(b64));
+      const ext = { "image/png": "png", "image/gif": "gif", "image/bmp": "bmp" }[typeOf(data)] || "jpg";
+      return await savePic(data, `Picture ${stamp()}.${ext}`);
+    } catch (e) { return null; }
+  };
+  const cur = S.note;
+  const parent = cur ? cur.parent : S.store.root;
+  const index = cur ? parent.children.indexOf(cur) + 1 : parent.children.length;
+  let top;
+  const make = async (par, idx, node) => {
+    const n = await S.store.newNote(par, idx, "");
+    let text;
+    if (node.lines) {
+      for (const ln of node.lines) for (const r of ln.runs) {
+        if (r.img && !saved.has(r.img)) saved.set(r.img, got.pictures.get(r.img) ? await savePic(got.pictures.get(r.img), `${stem} ${r.img}`) : null);
+      }
+      text = node.lines.length ? md.serialize(W.toNoteLines(node.lines, (name) => saved.get(name)), { dir: n.folderParts() })
+        : node.title + "\n";
+    } else {
+      const lines = await NB.qtHtmlLines(node.html, pagePicture);
+      text = NB.tidyNote(md.serialize(lines, { dir: n.folderParts() }), node.title);
+    }
+    await S.store.write(n, text);
+    await S.store.rename(n, md.titleOf(text) || node.title || "Untitled");
+    for (const c of node.children) await make(n, n.children.length, c);
+    return n;
+  };
+  await queue(async () => { top = await make(parent, index, { title: stem, lines: [], children: got.tree }); });
+  hideToast();
+  S.settings.expanded = [...new Set([...S.settings.expanded, top.key()])];
+  await openNote(top);
+  updateCount();
+  toast(`Imported ${NB.count(got.tree)} notes from ${file.name}`);
+  return top;
+}
+
 // which notes, for an export: this one, with those under it, or ones you tick
-async function chooseNotes(title, withPages) {
+async function chooseNotes(title, withPages, withComments = false) {
   const n = S.note;
   const box = document.createElement("div");
   box.className = "choose";
@@ -1553,8 +2319,18 @@ async function chooseNotes(title, withPages) {
     pages = l.querySelector("input");
     box.appendChild(l);
   }
+  let cbox = null;
+  if (withComments && S.store.all().some((x) => x.comments && x.comments.length)) {
+    const l = document.createElement("label");
+    l.className = "pages";
+    l.innerHTML = `<input type="checkbox"${S.settings.exportComments !== false ? " checked" : ""}> `;
+    l.append("With the comments");
+    cbox = l.querySelector("input");
+    box.appendChild(l);
+  }
   const v = await ask(title, box, [["Export", "go", true]]);
   if (!v) return null;
+  if (cbox) { S.settings.exportComments = cbox.checked; saveSettings(); }
   const which = box.querySelector('input[name="which"]:checked').value;
   let notes;
   if (which === "one") notes = [n];
@@ -1565,7 +2341,7 @@ async function chooseNotes(title, withPages) {
   }
   if (!notes.length) return null;
   if (pages) { S.settings.newPages = pages.checked; saveSettings(); }
-  return { notes, pages: !!(pages && pages.checked) };
+  return { notes, pages: !!(pages && pages.checked), comments: !!(cbox && cbox.checked) };
 }
 
 // the chosen notes, each with its title as a heading; picture links from `dir`
@@ -1607,13 +2383,68 @@ async function saveFile(blob, name, desc, ext, mime) {
   return name;
 }
 
+async function wordBlob(notes, pages, name, parts = null) {
+  parts = parts || await joinedParts(notes, []);
+  const W = await wordModule();
+  const lines = [];
+  parts.forEach(([, text], k) => {
+    const nl = md.parse(text);
+    for (const ln of nl) for (const r of ln.runs) if (r.img) r.img.target = md.resolvePicture(r.img.src, []);
+    const part = W.fromNoteLines(nl);
+    while (part.length && !part[part.length - 1].runs.length && !part[part.length - 1].kind) part.pop();
+    if (k && part.length) part[0][pages ? "pageBreak" : "gapBefore"] = true;
+    lines.push(...part);
+  });
+  const bytes = async (img) => {
+    try { return new Uint8Array(await (await S.store.pictureFile(img.target)).arrayBuffer()); } catch (e) {
+      try { return new Uint8Array(await (await S.store.pictureFile([PICTURES, img.target[img.target.length - 1]])).arrayBuffer()); } catch (e2) { return null; }
+    }
+  };
+  return W.writeDocx(lines, bytes, name);
+}
+
+// ------------------------------------------------------------------ Word copies (as the laptop keeps them)
+// RossNotes/Word Copies/<the note's place>.docx: the note and the notes under it, as Export as Word
+// makes them; the same file each time, so your sync app carries the latest to the laptop and Drive
+async function updateWordCopy(note = null, quiet = false) {
+  const n = note || S.note;
+  if (!n) return null;
+  if (!quiet) await flushSave();
+  const notes = [n, ...n.walk()];
+  const parts = await joinedParts(notes, []);
+  const blob = await wordBlob(notes, !!S.settings.newPages, md.safeName(n.title()), parts);
+  const where = await queue(() => S.store.writeWordCopy(n, blob));
+  if (!quiet) toast("Word copy saved: " + where);
+  return where;
+}
+
+const wordDue = new Set();
+let wordTimer = 0;
+// a note was saved: its Word copy, and those of the notes it's under, follow (after a pause)
+async function wordSoon(note) {
+  if (S.settings.wordAuto === false) return;
+  for (const x of [note, ...note.ancestors()]) if (await S.store.hasWordCopy(x)) wordDue.add(x.key());
+  if (wordDue.size) { clearTimeout(wordTimer); wordTimer = setTimeout(wordFlush, 2000); }
+}
+
+async function wordFlush() {
+  clearTimeout(wordTimer);
+  const due = [...wordDue].sort();
+  wordDue.clear();
+  for (const k of due) {
+    const n = S.store.find(k);
+    if (n) { try { await updateWordCopy(n, true); } catch (e) { console.error(e); } }
+  }
+}
+
 async function exportNotes(kind) {
   if (!S.note) return null;
   await flushSave();
   const label = { word: "Export as Word", pdf: "Export as PDF", md: "Export as Markdown" }[kind];
-  const got = await chooseNotes(label, kind !== "md");
+  const got = await chooseNotes(label, kind !== "md", kind !== "md");
   if (!got) return null;
   const { notes, pages } = got;
+  const withComments = got.comments && notes.some((x) => x.comments && x.comments.length);
   const name = md.safeName(notes.length === 1 ? notes[0].title() : notes[0].title());
   const parts = await joinedParts(notes, []);
   if (kind === "md") {
@@ -1624,22 +2455,12 @@ async function exportNotes(kind) {
   }
   if (kind === "word") {
     toast("Making the Word document…", 60000);
-    const W = await wordModule();
-    const lines = [];
-    parts.forEach(([, text], k) => {
-      const nl = md.parse(text);
-      for (const ln of nl) for (const r of ln.runs) if (r.img) r.img.target = md.resolvePicture(r.img.src, []);
-      const part = W.fromNoteLines(nl);
-      while (part.length && !part[part.length - 1].runs.length && !part[part.length - 1].kind) part.pop();
-      if (k && part.length) part[0][pages ? "pageBreak" : "gapBefore"] = true;
-      lines.push(...part);
-    });
-    const bytes = async (img) => {
-      try { return new Uint8Array(await (await S.store.pictureFile(img.target)).arrayBuffer()); } catch (e) {
-        try { return new Uint8Array(await (await S.store.pictureFile([PICTURES, img.target[img.target.length - 1]])).arrayBuffer()); } catch (e2) { return null; }
-      }
-    };
-    const blob = await W.writeDocx(lines, bytes, name);
+    let blob = await wordBlob(notes, pages, name, parts);
+    if (withComments) {
+      // the comments into it, each on its words in its note's part (wordpatch.exportComments)
+      const { exportComments } = await import("./wordpatch.js?v=2.1.2");
+      blob = await exportComments(await blob.arrayBuffer(), notes.map((x) => ({ title: x.title(), comments: x.comments || [] })));
+    }
     hideToast();
     const saved = await saveFile(blob, name + ".docx", "Word document", ".docx",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
@@ -1658,6 +2479,38 @@ async function exportNotes(kind) {
     ed.relayout(part);
     part.querySelector(".ln.title") && part.querySelector(".ln.title").classList.remove("title");
     doc.appendChild(part);
+    // the note's comments after it: who, when, the words they're on, what they say
+    const cs = withComments ? notes[k].comments || [] : [];
+    if (cs.length) {
+      const box = document.createElement("div");
+      box.className = "pcomments";
+      const h = document.createElement("div");
+      h.className = "pch";
+      h.textContent = "Comments";
+      box.appendChild(h);
+      const one = (c, reply) => {
+        const it = document.createElement("div");
+        it.className = "pc" + (reply ? " reply" : "");
+        const who = document.createElement("div");
+        who.className = "pcwho";
+        who.textContent = [c.author || "Someone", commentDate(c.date), c.done ? "resolved" : ""].filter(Boolean).join(" · ");
+        it.appendChild(who);
+        if (c.words && !reply) {
+          const q = document.createElement("div");
+          q.className = "pcwords";
+          q.textContent = "“" + c.words + "”";
+          it.appendChild(q);
+        }
+        const t = document.createElement("div");
+        t.className = "pctext";
+        t.textContent = c.text;
+        it.appendChild(t);
+        box.appendChild(it);
+        for (const r of cs.filter((o) => o.parent === c.id)) one(r, true);
+      };
+      for (const c of cs) if (!c.parent || !cs.some((o) => o.id === c.parent)) one(c, false);
+      doc.appendChild(box);
+    }
   });
   await loadPictures(doc);
   await Promise.all([...doc.querySelectorAll("img.pic")].map((i) => (i.decode ? i.decode().catch(() => {}) : null)));
@@ -1675,7 +2528,380 @@ async function exportNotes(kind) {
   return name;
 }
 
+// ------------------------------------------------------------------ email and sharing
+async function noteForEmail() {
+  const W = await wordModule();
+  return { W, title: titleNow(), lines: W.fromNoteLines(ed.readLines(page)) };
+}
+
+async function shareNote() {
+  if (!S.note) return null;
+  await flushSave();
+  const p = document.createElement("div");
+  p.textContent = "Send “" + titleNow() + "” by email or another app (Android's share panel opens), or copy it " +
+    "with its formatting to paste into an email.";
+  const how = await ask("Email or Share", p, [["As the message", "text", true], ["As a Word document", "word"],
+    ["Copy with formatting", "copy"]]);
+  if (how === "text") return shareText();
+  if (how === "word") return shareWord();
+  if (how === "copy") return copyForEmail();
+  return null;
+}
+
+async function shareText() {
+  const { W, title, lines } = await noteForEmail();
+  const text = W.plainText(lines);
+  if (navigator.share) {
+    try { await navigator.share({ title, text }); return "shared"; } catch (e) {
+      if (e && e.name === "AbortError") return null;
+    }
+  }
+  // no share panel here: a new email in the mail app
+  location.href = "mailto:?subject=" + encodeURIComponent(title) + "&body=" + encodeURIComponent(text.replace(/\n/g, "\r\n"));
+  return "mailto";
+}
+
+async function copyForEmail() {
+  const { W, title, lines } = await noteForEmail();
+  try {
+    await navigator.clipboard.write([new ClipboardItem({
+      "text/html": new Blob([W.htmlText(lines)], { type: "text/html" }),
+      "text/plain": new Blob([W.plainText(lines)], { type: "text/plain" }),
+    })]);
+    toast(`“${title}” copied, with its formatting: paste it into an email.`);
+    return true;
+  } catch (e) {
+    toast("Couldn't copy here: use Email or Share instead.");
+    return false;
+  }
+}
+
+async function shareWord() {
+  const got = await chooseNotes("Share as a Word Document", true);
+  if (!got) return null;
+  const { notes, pages } = got;
+  toast("Making the Word document…", 60000);
+  const name = md.safeName(notes[0].title());
+  const blob = await wordBlob(notes, pages, name);
+  hideToast();
+  const file = new File([blob], name + ".docx", { type: blob.type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    // a fresh tap, so Android lets the share panel open
+    const p = document.createElement("div");
+    p.textContent = `“${file.name}” is ready.`;
+    if (await ask("Share as a Word Document", p, [["Share", "go", true]])) {
+      try { await navigator.share({ files: [file], title: name }); return "shared"; } catch (e) {
+        if (e && e.name === "AbortError") return null;
+      }
+    }
+    return null;
+  }
+  const saved = await saveFile(blob, file.name, "Word document", ".docx", blob.type);
+  if (saved) toast("Saved " + saved + " (this browser can't share files): attach it to an email from there.");
+  return saved;
+}
+
+// ------------------------------------------------------------------ find and replace in the note you're in
+const FB = { text: $("find-text"), repl: $("find-repl"), count: $("find-count"), case: $("find-case"), whole: $("find-whole") };
+let replaceUndo = null;
+
+function openFind(replace) {
+  $("findbar").hidden = false;
+  const show = replace || (!$("find-repl").hidden && !$("findbar").dataset.closed);
+  for (const id of ["find-repl", "find-one", "find-all"]) $(id).hidden = !show;
+  delete $("findbar").dataset.closed;
+  const sel = window.getSelection();
+  const t = sel.rangeCount && page.contains(sel.anchorNode) ? sel.toString() : "";
+  if (t && !t.includes("\n") && t.length < 100) FB.text.value = t;
+  (replace && FB.text.value ? FB.repl : FB.text).focus();
+  if (!replace || !FB.text.value) FB.text.select();
+  findRefresh();
+}
+
+function closeFind() {
+  const ms = findAll();
+  $("findbar").hidden = true;
+  page.focus();
+  if (findCur >= 0 && ms[findCur]) selectMatch(ms[findCur]);   // the caret at the word you found
+  if (window.CSS && CSS.highlights) CSS.highlights.delete("find-current");
+  $("findbar").dataset.closed = "1";
+  if (window.CSS && CSS.highlights) CSS.highlights.delete("find");
+  page.focus();
+}
+
+// Word's codes: ^p a paragraph mark (a line's end), ^t a tab, ^^ a ^
+function codes(t) {
+  let out = "";
+  for (let k = 0; k < t.length; k++) {
+    if (t[k] === "^" && k + 1 < t.length && "pPtT^".includes(t[k + 1])) {
+      out += { p: "\n", t: "\t", "^": "^" }[t[k + 1].toLowerCase()];
+      k++;
+    } else out += t[k];
+  }
+  return out;
+}
+
+function findRegex() {
+  const t = codes(FB.text.value);
+  if (!t) return null;
+  let src = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (FB.whole.checked) src = "(?<![\\p{L}\\p{N}])" + src + "(?![\\p{L}\\p{N}])";
+  return new RegExp(src, "gu" + (FB.case.checked ? "" : "i"));
+}
+
+// the page's words, a line's end as "\n", and where each line starts
+function pageText() {
+  const lines = [...page.children];
+  const starts = [];
+  let at = 0;
+  const parts = lines.map((d) => { const t = ed.lineText(d); starts.push(at); at += t.length + 1; return t; });
+  return { lines, starts, text: parts.join("\n") };
+}
+
+function pointOf(pt, off) {
+  let i = 0;
+  while (i + 1 < pt.starts.length && pt.starts[i + 1] <= off) i++;
+  return { line: i, pos: off - pt.starts[i] };
+}
+
+// every match: {a: {line, pos}, b: {line, pos}, start, end} (a match can run over a line's end)
+function findAll() {
+  const re = findRegex();
+  const out = [];
+  if (!re) return out;
+  const pt = pageText();
+  let m;
+  re.lastIndex = 0;
+  while ((m = re.exec(pt.text))) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    out.push({ a: pointOf(pt, m.index), b: pointOf(pt, m.index + m[0].length), start: m.index, end: m.index + m[0].length });
+  }
+  return out;
+}
+
+function rangeOf(m) {
+  const lines = [...page.children];
+  const r = document.createRange();
+  const [n1, o1] = ed.pointAt(lines[m.a.line], m.a.pos);
+  const [n2, o2] = ed.pointAt(lines[m.b.line], m.b.pos);
+  r.setStart(n1, o1);
+  r.setEnd(n2, o2);
+  return r;
+}
+
+let findCur = -1;      // which match is the current one (marked; selected in the page when you go to the page)
+
+function findFrom() {
+  const c = ed.caret(page);
+  if (!c) return 0;
+  const pt = pageText();
+  return (pt.starts[c.a.line] || 0) + c.a.pos;
+}
+
+function findRefresh(jump = false) {
+  if ($("findbar").hidden) return [];
+  const ms = findAll();
+  if (jump) {
+    const at = findFrom();
+    findCur = ms.length ? Math.max(0, ms.findIndex((m) => m.start >= at)) : -1;
+  } else if (findCur >= ms.length) findCur = ms.length ? 0 : -1;
+  findMark(ms);
+  if (jump && findCur >= 0) showMatch(ms[findCur]);
+  return ms;
+}
+
+function findMark(ms) {
+  if (window.CSS && CSS.highlights && window.Highlight) {
+    try {
+      CSS.highlights.set("find", new Highlight(...ms.slice(0, 5000).map(rangeOf)));
+      if (findCur >= 0 && ms[findCur]) CSS.highlights.set("find-current", new Highlight(rangeOf(ms[findCur])));
+      else CSS.highlights.delete("find-current");
+    } catch (e) { /* no marks */ }
+  }
+  FB.count.textContent = !FB.text.value ? "" : findCur >= 0 && ms.length ? `${findCur + 1} of ${ms.length}` : "Not found";
+  FB.text.classList.toggle("none", !!FB.text.value && !ms.length);
+}
+
+// scrolled to, without taking the caret from where you're typing
+function showMatch(m) {
+  const div = page.children[m.a.line];
+  const sc = div && div.closest(".scroller");
+  if (!sc) return;
+  const top = div.getBoundingClientRect().top - sc.getBoundingClientRect().top;
+  if (top < 0 || top > sc.clientHeight - 40) sc.scrollTop += top - sc.clientHeight / 3;
+}
+
+function selectMatch(m) {
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(rangeOf(m));
+  showMatch(m);
+}
+
+function findGo(back) {
+  if ($("findbar").hidden || !FB.text.value) { openFind(false); return; }
+  const ms = findAll();
+  if (!ms.length) { findCur = -1; findMark(ms); return; }
+  if (findCur < 0) findCur = 0;
+  else findCur = (findCur + (back ? ms.length - 1 : 1)) % ms.length;
+  findMark(ms);
+  if (document.activeElement === page) selectMatch(ms[findCur]); else showMatch(ms[findCur]);
+}
+
+// a match replaced in the page itself: lines joined where a line's end is taken out (the first line's
+// kind stays), a new line (of the same kind, as Enter) for each ^p in the new words. Like the laptop.
+function replaceRange(m, text) {
+  const lines = [...page.children];
+  const A = lines[m.a.line], B = lines[m.b.line];
+  const r = rangeOf(m);
+  r.deleteContents();
+  if (A !== B) {
+    for (const x of [...lines.slice(m.a.line + 1, m.b.line)]) if (x.parentNode) x.remove();
+    for (const br of A.querySelectorAll("br")) br.remove();
+    for (const br of B.querySelectorAll("br")) br.remove();
+    while (B.firstChild) A.appendChild(B.firstChild);
+    B.remove();
+  }
+  let div = A;
+  let pos = m.a.pos;
+  text.split("\n").forEach((part, k) => {
+    if (k) {
+      // a new line from here, as Enter makes it
+      const [n, o] = ed.pointAt(div, pos);
+      const tail = document.createRange();
+      tail.setStart(n, o);
+      tail.setEnd(div, div.childNodes.length);
+      const frag = tail.extractContents();
+      const nl = document.createElement("div");
+      nl.className = "ln";
+      for (const key of ["kind", "mark", "code"]) if (div.dataset[key] != null) nl.dataset[key] = div.dataset[key];
+      if (div.dataset.code) nl.dataset.raw = "";
+      nl.appendChild(frag);
+      div.after(nl);
+      div = nl;
+      pos = 0;
+    }
+    if (part) {
+      const [n, o] = ed.pointAt(div, pos);
+      if (n.nodeType === 3) n.insertData(o, part);
+      else {
+        const t = document.createTextNode(part);
+        const rr = document.createRange();
+        rr.setStart(n, o);
+        rr.insertNode(t);
+      }
+      pos += part.length;
+    }
+  });
+  for (const d of [A, div]) {
+    if (!d.parentNode) continue;
+    for (const el of [...d.querySelectorAll("*")]) {
+      if (el.tagName !== "IMG" && el.tagName !== "BR" && !el.textContent && !el.querySelector("img")) el.remove();
+    }
+    if (!ed.lineText(d)) { if (!d.querySelector("br")) d.appendChild(document.createElement("br")); }
+    else for (const br of d.querySelectorAll("br")) br.remove();
+  }
+  return { line: page.children.length ? [...page.children].indexOf(div) : 0, pos };
+}
+
+function readOnlyHere() {
+  if (!A.note || !A.note.readOnly) return false;
+  toast(`Read-only: “${A.note.title()}” has ${A.note.readOnly.join(", ")}. Edit it in Ross Writer.`);
+  return true;
+}
+
+function replaceOne() {
+  if (readOnlyHere()) return;
+  const ms = findAll();
+  if (findCur < 0 || !ms[findCur]) { findGo(false); return; }
+  const m = ms[findCur];
+  const back = document.activeElement;
+  const text = codes(FB.repl.value);
+  let after;
+  if (m.a.line === m.b.line && !text.includes("\n")) {
+    selectMatch(m);
+    page.focus();
+    document.execCommand("insertText", false, text);   // keeps the words' formatting; Undo as usual
+    after = m.start + text.length;
+    afterEdit();
+  } else {
+    const before = page.innerHTML;
+    replaceRange(m, text);
+    ed.tidy(page);
+    replaceUndo = { page, before, after: page.innerHTML };
+    ed.relayout(page);
+    changed();
+    after = m.start + text.length;
+  }
+  // the next one: the first match after the replaced words
+  const ms2 = findAll();
+  findCur = ms2.length ? ms2.findIndex((x) => x.start >= after) : -1;
+  if (findCur < 0 && ms2.length) findCur = 0;
+  findMark(ms2);
+  if (findCur >= 0) showMatch(ms2[findCur]);
+  if (back && back !== page && back.focus) back.focus();
+}
+
+function replaceAll() {
+  if (readOnlyHere()) return 0;
+  const ms = findAll();
+  if (!ms.length) return 0;
+  const before = page.innerHTML;
+  const text = codes(FB.repl.value);
+  for (const m of [...ms].reverse()) replaceRange(m, text);   // from the end, so the places before stay right
+  ed.tidy(page);
+  replaceUndo = { page, before, after: page.innerHTML };
+  ed.relayout(page);
+  changed();
+  findCur = -1;
+  findRefresh();
+  FB.count.textContent = `Replaced ${ms.length}`;
+  toast(`Replaced ${ms.length}`);
+  return ms.length;
+}
+
+// Undo straight after Replace All: everything back as it was
+function undoReplaceAll() {
+  if (!replaceUndo || replaceUndo.page !== page || page.innerHTML !== replaceUndo.after) { replaceUndo = null; return false; }
+  page.innerHTML = replaceUndo.before;
+  replaceUndo = null;
+  ed.relayout(page);
+  changed();
+  findRefresh();
+  return true;
+}
+
+$("find-prev").onclick = () => findGo(true);
+$("find-next").onclick = () => findGo(false);
+$("find-one").onclick = replaceOne;
+$("find-all").onclick = replaceAll;
+$("find-close").onclick = closeFind;
+for (const id of ["find-prev", "find-next", "find-one", "find-all", "find-close"]) $(id).addEventListener("mousedown", (e) => e.preventDefault());
+FB.text.addEventListener("input", () => findRefresh(true));
+FB.case.addEventListener("change", () => findRefresh());
+FB.whole.addEventListener("change", () => findRefresh());
+FB.text.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); findGo(e.shiftKey); } });
+FB.repl.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); replaceOne(); } });
+let findTimer = 0;
+for (const p of P) p.page.addEventListener("input", () => { clearTimeout(findTimer); findTimer = setTimeout(() => findRefresh(), 250); });
+
+// ------------------------------------------------------------------ the headings in the note: go to one
+function showHeadings() {
+  const hs = [...page.children].filter((d) => /^h[1-6]$/.test(d.dataset.kind || "") && ed.lineText(d).split(md.OBJ).join("").trim());
+  const top = Math.min(...hs.map((d) => +d.dataset.kind[1]), 9);
+  const items = hs.length ? hs.map((d) => ({
+    label: "\u2003".repeat(+d.dataset.kind[1] - top) + ed.lineText(d).split(md.OBJ).join("").trim().slice(0, 70),
+    fn: () => {
+      const sc = d.closest(".scroller");
+      if (sc) sc.scrollTop += d.getBoundingClientRect().top - sc.getBoundingClientRect().top - 8;
+      page.focus();
+      ed.placeCaret(...ed.pointAt(d, 0));
+    },
+  })) : [{ label: "No headings in this note", off: true, fn: () => {} }];
+  showMenu(document.querySelector('[data-cmd="headings"]') || $("toolbar"), items);
+}
+
 // for the tests
-window.RN = { S, P, importWord, exportNotes, joinedParts, wordModule, saveFile, setActive, setSplit, get A() { return A; }, md, ed, flushSave, refresh, openNote, newNote, moveNote, addPictures, pasteLines, COMMANDS, VERSION };
+window.RN = { S, P, openWordDoc, openMdFile, openDocFile, chooseWordDoc, addComment, commentAction, askAuthor, renderComments, toggleComments, goToWords, openProject, chooseProject, backToNotes, openRoot, updateWordCopy, wordFlush, get wordDue() { return [...wordDue]; }, wordsIn, countWords, countBranch, codes, get findCur() { return findCur; }, openFind, findAll, findGo, replaceOne, replaceAll, showHeadings, importNotebook, shareNote, shareText, shareWord, copyForEmail, importWord, exportNotes, joinedParts, wordModule, saveFile, setActive, setSplit, get A() { return A; }, md, ed, flushSave, refresh, openNote, newNote, moveNote, addPictures, pasteLines, COMMANDS, VERSION };
 
 start();

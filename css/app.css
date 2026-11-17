@@ -61,6 +61,20 @@ button { font: inherit; color: inherit; }
 .tb.hl.on { outline: 2px solid var(--sel); }
 .sep { flex: none; width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
 
+/* find and replace */
+#findbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px 6px; background: var(--ui);
+  border-bottom: 1px solid var(--line); flex: none; }
+#findbar input[type=search], #findbar input[type=text] { flex: 1 1 140px; min-width: 110px; height: 32px; padding: 2px 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font: inherit; }
+#findbar input.none { background: #f8d7d7; color: #222; }
+#findbar button { height: 32px; min-width: 32px; padding: 0 9px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; cursor: pointer; }
+#findbar button:hover { background: var(--ui2); }
+#findbar label { display: flex; align-items: center; gap: 4px; font-size: 14px; white-space: nowrap; }
+#find-count { min-width: 64px; font-size: 13px; color: var(--ui-muted); }
+::highlight(find) { background-color: #ffd699; color: #1d1a10; }
+::highlight(find-current) { background-color: #ff8f00; color: #000; }
+
 /* the list and the page */
 #main { flex: 1; display: flex; min-height: 0; position: relative; }
 #side { width: var(--side, 260px); min-width: 120px; display: flex; flex-direction: column; background: var(--ui);
@@ -80,6 +94,12 @@ button { font: inherit; color: inherit; }
 .row.cur .tw { color: #dfe8f7; }
 .row .lbl { overflow: hidden; text-overflow: ellipsis; }
 .row.match .lbl { font-weight: 600; }
+.row .flag { flex: none; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+.row .ro { flex: none; margin-left: 8px; padding: 0 5px; border: 1px solid var(--line); border-radius: 3px;
+  font-size: 11px; color: var(--ui-muted); }
+.row.cur .ro { color: #dfe8f7; border-color: #9fb6dc; }
+.pane.readonly .page { background: var(--ui); }
+.pane.readonly .head .hname { font-style: italic; }
 #count { padding: 4px 8px calc(4px + env(safe-area-inset-bottom)); font-size: 12px; color: var(--ui-muted);
   border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #divider { flex: none; width: 7px; cursor: col-resize; background: var(--ui2); border-right: 1px solid var(--line);
@@ -92,10 +112,41 @@ button { font: inherit; color: inherit; }
   border-right: 1px solid var(--line); touch-action: none; }
 #panes.split-v #pdiv { width: auto; height: 8px; cursor: row-resize; border: 0; border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line); }
-.head { flex: none; padding: 5px 12px; background: var(--head); color: var(--head-ink); font-size: 13px; font-weight: 600;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.head { flex: none; display: flex; gap: 12px; padding: 5px 12px; background: var(--head); color: var(--head-ink); font-size: 13px;
+  font-weight: 600; white-space: nowrap; overflow: hidden; }
+.head .hname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.head .hwords { flex: none; font-weight: 400; opacity: .75; font-variant-numeric: tabular-nums; }
 .split .pane:not(.active) .head { background: var(--head-off); color: var(--head-off-ink); font-weight: 400; }
+.pbody { flex: 1; min-height: 0; display: flex; }
+.pbody .scroller { flex: 1; min-width: 0; }
 .scroller { flex: 1; overflow: auto; background: var(--paper); -webkit-overflow-scrolling: touch; }
+/* a scene's Word comments, beside the page (under it when the pane is narrow) */
+.cpanel { flex: none; width: 300px; overflow: auto; background: var(--ui); border-left: 1px solid var(--line);
+  font-size: 13px; -webkit-overflow-scrolling: touch; }
+.pane.cbelow .pbody { flex-direction: column; }
+.pane.cbelow .cpanel { width: auto; max-height: 38%; border-left: 0; border-top: 1px solid var(--line); }
+.cpanel .ctop { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 10px; background: var(--ui); border-bottom: 1px solid var(--line); font-weight: 600; }
+.cpanel .ctop button { border: 0; background: none; font: inherit; color: var(--ui-muted); cursor: pointer; padding: 2px 6px; }
+.cpanel .citem { margin: 8px; padding: 8px 10px; background: var(--paper); border: 1px solid var(--line);
+  border-left: 3px solid #e6c229; border-radius: 4px; cursor: pointer; }
+.cpanel .citem.reply { margin-left: 24px; border-left-color: var(--line); }
+.cpanel .citem.done { opacity: .6; }
+.cpanel .cwho { font-size: 12px; color: var(--ui-muted); margin-bottom: 4px; }
+.cpanel .cwords { font-style: italic; color: var(--ui-muted); margin-bottom: 4px; }
+.cpanel .ctext { white-space: pre-wrap; }
+.cpanel .cacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.cpanel .cacts button { border: 1px solid var(--line); background: var(--ui); color: var(--ui-ink); border-radius: 3px;
+  font: inherit; font-size: 12px; padding: 3px 8px; min-height: 28px; cursor: pointer; }
+.cform { display: flex; flex-direction: column; gap: 10px; min-width: min(420px, 80vw); }
+.cform label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.cform input, .cform textarea { font: inherit; font-size: 15px; padding: 6px 8px; border: 1px solid var(--line);
+  border-radius: 4px; background: var(--paper); color: var(--ink, inherit); }
+.cform textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+.cform .cquote { font-style: italic; color: var(--ui-muted); }
+.head .hcomments { flex: none; border: 1px solid currentColor; border-radius: 10px; background: none; color: inherit;
+  font: inherit; font-size: 12px; font-weight: 400; padding: 0 8px; opacity: .8; cursor: pointer; }
+.head .hcomments.on { opacity: 1; background: rgba(255,255,255,.15); }
 .app-narrow #side { position: absolute; z-index: 5; top: 0; bottom: 0; left: 0; width: min(85vw, 340px);
   box-shadow: 2px 0 12px rgba(0,0,0,.25); }
 .app-narrow #divider { display: none; }
@@ -165,8 +216,14 @@ button { font: inherit; color: inherit; }
   #printdoc .part.newpage { break-before: page; }
   .page span[style*="background"] { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   #printdoc .part.gap { margin-top: 18pt; }
+  #printdoc .pcomments { margin-top: 12pt; padding-top: 6pt; border-top: 0.5pt solid #999; font-size: 9.5pt; break-inside: auto; }
+  #printdoc .pch { font-weight: 700; margin-bottom: 4pt; }
+  #printdoc .pc { margin: 0 0 6pt; padding-left: 6pt; border-left: 2pt solid #e6c229; break-inside: avoid; }
+  #printdoc .pc.reply { margin-left: 14pt; border-left-color: #bbb; }
+  #printdoc .pcwho { color: #555; font-size: 8.5pt; }
+  #printdoc .pcwords { font-style: italic; color: #444; }
   html, body, #app { height: auto; background: #fff; }
-  #menubar, #dialog, #toolbar, #side, #divider, #pdiv, .head, #chip, #menu, #toast, #start, .pane:not(.active) { display: none !important; }
+  #menubar, #findbar, #dialog, #toolbar, #side, #divider, #pdiv, .head, #chip, #menu, #toast, #start, .pane:not(.active) { display: none !important; }
   #main, #panes, .pane, .scroller { display: block; overflow: visible; background: #fff; }
   .page { padding: 0; min-height: 0; background: #fff; color: #000; font-size: 12pt; }
   .page a { color: #000; }

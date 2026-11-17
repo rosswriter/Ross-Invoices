@@ -3,14 +3,17 @@
 //   Novel ideas.md
 //   Novel ideas/          the notes under "Novel ideas"
 //   Pictures/             pictures in notes (not a note)
+//   Word Copies/          a Word document kept for a note, as the tree (not a note)
 //   .order                the order of the notes in a folder (JSON list of names)
 //   .trash/<time>/        deleted notes
-import { safeName, titleOf } from "./md.js";
+import { safeName, titleOf } from "./md.js?v=2.1.2";
 
 export const EXT = ".md";
 export const ORDER = ".order";
 export const TRASH = ".trash";
 export const PICTURES = "Pictures";
+export const WORD = "Word Copies";
+export const DOCX = ".docx";
 
 export class Note {
   constructor(parent, name) {
@@ -122,7 +125,7 @@ export class Store {
         continue;
       }
       if (h.kind === "file" && name.endsWith(EXT) && !name.endsWith(".rossnote-tmp")) files.set(name.slice(0, -EXT.length), h);
-      else if (h.kind === "directory" && !(parent.isRoot() && name === PICTURES)) dirs.push(name);
+      else if (h.kind === "directory" && !(parent.isRoot() && (name === PICTURES || name === WORD))) dirs.push(name);
     }
     // a folder with no note of its own still shows (as a note made for it)
     for (const name of dirs) {
@@ -182,6 +185,41 @@ export class Store {
     const fh = await writeFile(d, note.name + EXT, text);
     note.text = text;
     note.modified = (await fh.getFile()).lastModified;
+    if (this.onWrite) this.onWrite(note);
+  }
+
+  // ------------------------------------------------------------ Word copies (as the laptop keeps them)
+  // [folder names, file name] of the Word copy for a note with this key
+  wordPlace(key) {
+    const parts = key.split("/");
+    return [[WORD, ...parts.slice(0, -1)], parts[parts.length - 1] + DOCX];
+  }
+
+  async hasWordCopy(note) {
+    const [dirs, name] = this.wordPlace(note.key());
+    try { return await exists(await this.dir(dirs), name, "file"); } catch (e) { return false; }
+  }
+
+  async writeWordCopy(note, blob) {
+    const [dirs, name] = this.wordPlace(note.key());
+    await writeFile(await this.dir(dirs, true), name, blob);
+    return [...dirs, name].join("/");
+  }
+
+  // a note's Word copy (and those of the notes under it) follow it
+  async moveWordCopy(oldKey, newKey) {
+    if (!oldKey || oldKey === newKey) return;
+    try {
+      const [od, on] = this.wordPlace(oldKey), [nd, nn] = this.wordPlace(newKey);
+      let from;
+      try { from = await this.dir(od); } catch (e) { return; }
+      const stemO = on.slice(0, -DOCX.length), stemN = nn.slice(0, -DOCX.length);
+      const hasFile = await exists(from, on, "file"), hasDir = await exists(from, stemO, "directory");
+      if (!hasFile && !hasDir) return;
+      const to = await this.dir(nd, true);
+      if (hasFile) await moveEntry(from, on, to, nn, "file");
+      if (hasDir) await moveEntry(from, stemO, to, stemN, "directory");
+    } catch (e) { /* left where it was */ }
   }
 
   async writeOrder(parent) {
@@ -205,7 +243,7 @@ export class Store {
   async uniqueName(parent, want, exclude = null) {
     const base = safeName(want);
     const taken = new Set(parent.children.filter((c) => c !== exclude).map((c) => c.name.toLowerCase()));
-    if (parent.isRoot()) taken.add(PICTURES.toLowerCase());
+    if (parent.isRoot()) { taken.add(PICTURES.toLowerCase()); taken.add(WORD.toLowerCase()); }
     let d = null;
     try { d = await this.dir(parent.childParts()); } catch (e) { /* not made yet */ }
     let name = base, k = 2;
@@ -231,11 +269,13 @@ export class Store {
     const parent = note.parent;
     const name = await this.uniqueName(parent, title, note);
     if (name === note.name) return false;
+    const oldKey = note.key();
     const d = await this.dir(parent.childParts());
     await moveEntry(d, note.name + EXT, d, name + EXT, "file");
     if (await exists(d, note.name, "directory")) await moveEntry(d, note.name, d, name, "directory");
     note.name = name;
     await this.writeOrder(parent);
+    await this.moveWordCopy(oldKey, note.key());
     return true;
   }
 
@@ -250,6 +290,7 @@ export class Store {
       await this.writeOrder(newParent);
       return true;
     }
+    const oldKey = note.key();
     const from = await this.dir(oldParent.childParts());
     oldParent.children.splice(oldIndex, 1);
     const name = await this.uniqueName(newParent, note.name);
@@ -261,6 +302,7 @@ export class Store {
     newParent.children.splice(Math.max(0, Math.min(index, newParent.children.length)), 0, note);
     await this.writeOrder(oldParent);
     await this.writeOrder(newParent);
+    await this.moveWordCopy(oldKey, note.key());
     return true;
   }
 
@@ -274,6 +316,13 @@ export class Store {
     const d = await this.dir(note.folderParts());
     if (await exists(d, note.name + EXT, "file")) await moveEntry(d, note.name + EXT, trash, note.name + EXT, "file");
     if (await exists(d, note.name, "directory")) await moveEntry(d, note.name, trash, note.name, "directory");
+    try {
+      const [wd, wn] = this.wordPlace(note.key());
+      const w = await this.dir(wd);
+      if (await exists(w, wn, "file")) await moveEntry(w, wn, trash, note.name + DOCX, "file");
+      const stem = wn.slice(0, -DOCX.length);
+      if (await exists(w, stem, "directory")) await moveEntry(w, stem, trash, note.name + " (Word Copies)", "directory");
+    } catch (e) { /* no Word copy */ }
     const parent = note.parent;
     parent.children.splice(parent.children.indexOf(note), 1);
     await this.writeOrder(parent);

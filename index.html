@@ -9,7 +9,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/app.css?v=2.1.2">
 </head>
 <body>
 <div id="app">
@@ -42,6 +42,8 @@
     <button data-cmd="quote" class="tb" title="Indented quote (Ctrl+M)">❝ Quote</button>
     <span class="sep"></span>
     <button data-cmd="date" class="tb" title="Today's date (Ctrl+;)">Date</button>
+    <button data-cmd="find" class="tb" title="Find and replace in this note (Ctrl+F, Ctrl+H)">Find</button>
+    <button data-cmd="headings" class="tb" title="Go to a heading in this note (Ctrl+Shift+O)">Headings</button>
     <button data-cmd="picture" class="tb" title="Insert a picture or photo">Picture</button>
     <span class="sep"></span>
     <button data-cmd="undo" class="tb" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
@@ -52,8 +54,21 @@
     <button data-cmd="splith" class="tb" title="Split side by side (Ctrl+\)">Split ⇆</button>
     <button data-cmd="splitv" class="tb" title="Split top and bottom (Ctrl+Shift+\)">Split ⇅</button>
     <button data-cmd="dark" class="tb" title="Light / dark (Ctrl+Shift+D)" aria-label="Light or dark">☾</button>
+    <button data-cmd="share" class="tb" title="Email or share this note">Share</button>
     <button data-cmd="print" class="tb" title="Print or save as PDF (Ctrl+P)">Print</button>
   </header>
+  <div id="findbar" hidden>
+    <input id="find-text" type="search" placeholder="Find in this note" autocomplete="off" enterkeyhint="search">
+    <button id="find-prev" title="Previous (Shift+F3)">↑</button>
+    <button id="find-next" title="Next (F3, Enter)">↓</button>
+    <span id="find-count"></span>
+    <input id="find-repl" type="text" placeholder="Replace with" autocomplete="off" enterkeyhint="go">
+    <button id="find-one" title="Replace this one and go to the next">Replace</button>
+    <button id="find-all" title="Replace every one in this note (Undo takes it all back)">Replace All</button>
+    <label><input id="find-case" type="checkbox"> Match case</label>
+    <label><input id="find-whole" type="checkbox"> Whole words</label>
+    <button id="find-close" title="Close (Esc)">×</button>
+  </div>
   <div id="main">
     <aside id="side">
       <div id="side-top">
@@ -99,8 +114,9 @@
   </div>
 </div>
 <input id="file-pic" type="file" accept="image/*" multiple hidden>
+<input id="file-book" type="file" accept=".ncdb,.fnx" hidden>
 <input id="file-docx" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
 <div id="printdoc" class="page"></div>
-<script type="module" src="js/app.js"></script>
+<script type="module" src="js/app.js?v=2.1.2"></script>
 </body>
 </html>
