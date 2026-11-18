@@ -3,6 +3,7 @@
 // (pdf-lib) and paints the preview (a canvas), measuring text the same way
 // for both, so the preview is what the PDF will be.
 import * as M from "./money.js";
+import { EDITION } from "./edition.js";
 
 export const A4_W = 595.28, A4_H = 841.89;
 const MARGIN = 54.0, BOTTOM = 46.0;
@@ -11,7 +12,7 @@ const C = {
   WHITE: "#ffffff", BLACK: "#111111", ORANGE: "#f59a0c", GREY: "#a3a3a3", INK: "#1c1c1c", SOFT: "#6b6b6b",
   RULE: "#e4e4e4",
 };
-export const STYLES = [["classic", "Classic (navy)"], ["circles", "INV circles"]];
+export const STYLES = [["classic", "Classic (navy)"], ["circles", "Circles (INV, or your logo)"]];
 const CAP = 0.727;          // Inter's capital height, as a share of the size
 
 // ------------------------------------------------------------------ fonts
@@ -60,6 +61,7 @@ class MeasurePen {
   rect() {}
   line() {}
   ellipse() {}
+  logo() {}
   newPage() { this.pages++; }
 }
 
@@ -91,6 +93,9 @@ class PdfPen extends MeasurePen {
   }
   ellipse(x, y, w, h, fill) {
     this.page.drawEllipse({ x: x + w / 2, y: A4_H - y - h / 2, xScale: w / 2, yScale: h / 2, color: this.col(fill) });
+  }
+  logo(x, y, w, h) {
+    if (this.logoImg) this.page.drawImage(this.logoImg, { x, y: A4_H - y - h, width: w, height: h });
   }
   newPage() { super.newPage(); this.page = this.doc.addPage([A4_W, A4_H]); }
 }
@@ -138,6 +143,9 @@ class CanvasPen extends MeasurePen {
     const c = this.ctx;
     c.fillStyle = fill;
     c.beginPath(); c.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2); c.fill();
+  }
+  logo(x, y, w, h) {
+    if (this.logoImg) this.ctx.drawImage(this.logoImg, x, y, w, h);
   }
   newPage() { super.newPage(); this.start(); }
 }
@@ -203,13 +211,56 @@ function stampOf(inv, partCol) {
 
 const lineAmt = (it) => M.lineAmount(it.quantity, it.unit_price);
 
+// "Invoice", "Estimate" or "Quotation"
+export function docWord(inv, s) {
+  if (inv.kind !== "estimate") return "Invoice";
+  return (s || {}).estimate_word === "Quotation" ? "Quotation" : "Estimate";
+}
+
+// The logo's size on the page: no taller than h, no wider than maxW.
+function logoSize(b, h, maxW) {
+  if (!b.logo || !b.logo_w || !b.logo_h) return null;
+  let w = h * b.logo_w / b.logo_h;
+  if (w > maxW) { h = h * maxW / w; w = maxW; }
+  return [w, h];
+}
+
+// The table's rows: the lines, under section headings (Materials, Labour…)
+// with a subtotal for each when there's more than one section.
+function tableRows(inv) {
+  const items = inv.items || [];
+  if (!items.some((it) => (it.group || "").trim())) return items.map((it) => ({ k: "item", it }));
+  const order = [], by = {};
+  for (const it of items) {
+    const g = (it.group || "").trim();
+    if (!(g in by)) { by[g] = []; order.push(g); }
+    by[g].push(it);
+  }
+  order.sort((a, b) => (a !== "") - (b !== ""));        // lines with no section first
+  const named = order.filter((g) => g);
+  const out = [];
+  for (const g of order) {
+    if (g) out.push({ k: "head", text: g });
+    for (const it of by[g]) out.push({ k: "item", it });
+    if (g && named.length > 1) out.push({ k: "sub", text: `${g} subtotal`, amount: by[g].reduce((s2, it) => s2 + lineAmt(it), 0n) });
+  }
+  return out;
+}
+
+function taxNumberLine(s) {
+  const n = (s.business.tax_number || "").trim();
+  return n ? `${(s.defaults || {}).tax_label || "VAT"} reg. no.: ${n}` : "";
+}
+
 // ------------------------------------------------------------------ Classic (navy)
 function paintClassic(pen, inv, s) {
   const cur = inv.currency || "GBP";
   const money = (a) => M.fmt(a, cur);
   const right = A4_W - MARGIN, width = A4_W - 2 * MARGIN;
 
-  const top = MARGIN + 14;
+  const lg = logoSize(s.business, 46, 190);
+  if (lg) pen.logo(MARGIN, MARGIN - 8, lg[0], lg[1]);
+  const top = MARGIN + 14 + (lg ? lg[1] + 6 : 0);
   const [first, rest] = wordmarkParts(s.business.name);
   const w1 = pen.text(MARGIN, top, first, font(17, "bold"), C.ACCENT);
   const w2 = rest ? pen.text(MARGIN + w1 + 5, top, rest, font(17), C.BLACK) : -5;
@@ -218,6 +269,7 @@ function paintClassic(pen, inv, s) {
   const addr = String(b.address || "").split("\n").filter((x) => x.trim());
   const contact = [b.email, b.phone, b.website].filter(Boolean).join("  |  ");
   if (contact) addr.push(contact);
+  if (taxNumberLine(s)) addr.push(taxNumberLine(s));
   const f9 = font(8.6);
   const boxTop = top + 19;
   let boxBottom;
@@ -231,14 +283,16 @@ function paintClassic(pen, inv, s) {
   } else boxBottom = top + 12;
 
   const est = inv.kind === "estimate";
-  pen.text(right, MARGIN + 18, est ? "ESTIMATE" : "INVOICE", font(24, "bold"), C.ACCENT, "right");
+  const W = docWord(inv, s);
+  pen.text(right, MARGIN + 18, W.toUpperCase(), font(24, "bold"), C.ACCENT, "right");
   const f10 = font(9.5);
   let my = MARGIN + 40;
   const meta = est
-    ? [`Estimate no.: ${inv.number}`, `Date: ${M.longDate(inv.issue_date)}`,
+    ? [`${W} no.: ${inv.number}`, `Date: ${M.longDate(inv.issue_date)}`,
       ...(inv.valid_until ? [`Valid until: ${M.longDate(inv.valid_until)}`] : [])]
     : [`Invoice no.: ${inv.number}`, `Issue date: ${M.longDate(inv.issue_date)}`,
       `Due date: ${M.longDate(inv.due_date) || "On receipt"}`];
+  if ((inv.reference || "").trim()) meta.push(`Your ref.: ${inv.reference.trim()}`);
   for (const m of meta) {
     pen.text(right, my, m, f10, C.BLACK, "right");
     my += 15;
@@ -277,7 +331,24 @@ function paintClassic(pen, inv, s) {
   y = header(y);
   let zebra = false;
   const limit = A4_H - BOTTOM - 22;
-  for (const it of inv.items) {
+  for (const row of tableRows(inv)) {
+    if (row.k === "head") {
+      if (y + 22 + 20 > limit) { y = header(nextPage()); }
+      pen.text(MARGIN + 6, y + 16, row.text.toUpperCase(), font(9, "bold"), C.ACCENT);
+      y += 22;
+      zebra = false;
+      continue;
+    }
+    if (row.k === "sub") {
+      if (y + 20 > limit) { y = header(nextPage()); }
+      pen.line(colPrice - 60, y + 1, right, y + 1, C.MID, 0.4);
+      pen.text(colPrice, y + 14, row.text, font(9, "semibold"), C.DARK, "right");
+      pen.text(colAmount, y + 14, money(row.amount), font(9, "semibold"), C.DARK, "right");
+      y += 22;
+      zebra = false;
+      continue;
+    }
+    const it = row.it;
     const lines = wrap(it.description, frow, descW);
     const rowH = Math.max(20, 8 + 12.6 * lines.length);
     if (y + rowH > limit) { y = header(nextPage()); zebra = false; }
@@ -313,7 +384,7 @@ function paintClassic(pen, inv, s) {
   const barCol = inv.total > 0n && inv.balance <= 0n ? C.GREEN : C.ACCENT;
   pen.rect(barX, barTop, right - barX, 25, barCol);
   const fb = font(10.5, "bold");
-  pen.text(barX + 8, barTop + 16.5, est ? "Estimate Total" : "Balance Due", fb, C.WHITE);
+  pen.text(barX + 8, barTop + 16.5, est ? `${W} Total` : "Balance Due", fb, C.WHITE);
   pen.text(colAmount, barTop + 16.5, money(inv.balance), fb, C.WHITE, "right");
   y = barTop + 25;
 
@@ -349,7 +420,7 @@ function paintClassic(pen, inv, s) {
 }
 
 function footerClassic(pen, inv, s, n, total) {
-  let txt = `${s.business.name || ""} — ${inv.kind === "estimate" ? "Estimate" : "Invoice"} ${inv.number}`;
+  let txt = `${s.business.name || ""} — ${docWord(inv, s)} ${inv.number}`;
   if (total > 1) txt += ` — page ${n} of ${total}`;
   pen.text(A4_W / 2, A4_H - 22, txt, font(7.5), C.MID, "centre");
 }
@@ -364,17 +435,24 @@ function paintCircles(pen, inv, s) {
   const d = 58, gap = 10, top = 42;
   const fc = font(28);
   const est = inv.kind === "estimate";
-  const L = est ? "EST" : "INV";
-  [[L[0], C.GREY], [L[1], C.ORANGE], [L[2], C.GREY]].forEach(([ch, col], i) => {
-    const x = Mg + i * (d + gap);
-    pen.ellipse(x, top, d, d, col);
-    pen.text(x + d / 2, top + d / 2 + fc.size * CAP / 2, ch, fc, C.WHITE, "centre");
-  });
+  const W = docWord(inv, s);
+  const L = { Invoice: "INV", Estimate: "EST", Quotation: "QUO" }[W];
+  // a logo takes the place of the circles
+  const lg = logoSize(s.business, d, 260);
+  if (lg) pen.logo(Mg, top + (d - lg[1]) / 2, lg[0], lg[1]);
+  else {
+    [[L[0], C.GREY], [L[1], C.ORANGE], [L[2], C.GREY]].forEach(([ch, col], i) => {
+      const x = Mg + i * (d + gap);
+      pen.ellipse(x, top, d, d, col);
+      pen.text(x + d / 2, top + d / 2 + fc.size * CAP / 2, ch, fc, C.WHITE, "centre");
+    });
+  }
 
   const b = s.business;
   let y = top + d + 34;
   pen.text(Mg, y, b.name || "", font(22), C.INK);
   const addr = String(b.address || "").split("\n").filter((x) => x.trim());
+  if (taxNumberLine(s)) addr.push(taxNumberLine(s));
   const contact = [b.phone, b.email, b.website].filter(Boolean);
   const ay = y + 22;
   const aw = Math.max(0, ...addr.map((x) => pen.width(x, f8)));
@@ -386,14 +464,16 @@ function paintCircles(pen, inv, s) {
   const lx = right - 165;
   let my = top + d + 12;
   const meta = est
-    ? [["Estimate #", inv.number], ["Date", M.longDate(inv.issue_date)],
+    ? [[`${W} #`, inv.number], ["Date", M.longDate(inv.issue_date)],
       ...(inv.valid_until ? [["Valid until", M.longDate(inv.valid_until)]] : [])]
     : [["Invoice #", inv.number], ["Date", M.longDate(inv.issue_date)],
       ["Due", M.longDate(inv.due_date) || "On receipt"]];
+  if ((inv.reference || "").trim()) meta.push(["Your ref.", inv.reference.trim()]);
   for (const [a, v] of meta) {
     pen.text(lx + 50, my, a, fb, C.INK, "right");
-    pen.text(right - 6, my, v, f8, C.INK, "right");
-    my += 13;
+    const vl = wrap(v, f8, right - 6 - (lx + 62));
+    vl.forEach((ln, k) => pen.text(right - 6, my + k * 11.5, ln, f8, C.INK, "right"));
+    my += 13 + 11.5 * (vl.length - 1);
   }
   if (inv.show_stamp !== false && !est) {
     const [stamp, col] = stampOf(inv, C.ORANGE);
@@ -428,7 +508,24 @@ function paintCircles(pen, inv, s) {
   const nextPage = () => { pen.newPage(); return MARGIN; };
   y = header(y);
   const limit = A4_H - BOTTOM - 22;
-  for (const it of inv.items) {
+  for (const row of tableRows(inv)) {
+    if (row.k === "head") {
+      if (y + 26 + 28 > limit) y = header(nextPage());
+      pen.ellipse(Mg + 8, y + 10, 7, 7, C.ORANGE);
+      pen.text(Mg + 20, y + 17, row.text, font(9.2, "bold"), C.INK);
+      y += 24;
+      pen.line(Mg, y, right, y, C.RULE, 0.6);
+      continue;
+    }
+    if (row.k === "sub") {
+      if (y + 24 > limit) y = header(nextPage());
+      pen.text(colPrice, y + 16, row.text, font(8.6, "semibold"), C.SOFT, "right");
+      pen.text(colAmount, y + 16, money(row.amount), font(8.8, "semibold"), C.INK, "right");
+      y += 24;
+      pen.line(Mg, y, right, y, C.RULE, 0.6);
+      continue;
+    }
+    const it = row.it;
     const lines = wrap(it.description, frow, descW);
     const rowH = Math.max(28, 16 + 12.4 * lines.length);
     if (y + rowH > limit) y = header(nextPage());
@@ -467,7 +564,7 @@ function paintCircles(pen, inv, s) {
   const barTop = ty, barX = colQty - 50;
   const barCol = inv.total > 0n && inv.balance <= 0n ? C.GREEN : C.INK;
   pen.rect(barX, barTop, right - barX, 24, barCol);
-  pen.text(barX + 10, barTop + 16, est ? "Estimate Total" : "Balance Due", font(11), C.WHITE);
+  pen.text(barX + 10, barTop + 16, est ? `${W} Total` : "Balance Due", font(11), C.WHITE);
   pen.text(colAmount, barTop + 16, money(inv.balance), font(11, "semibold"), C.WHITE, "right");
   y = barTop + 24;
 
@@ -534,11 +631,18 @@ export async function makePdf(inv, s) {
   doc.registerFontkit(window.fontkit);
   const emb = {};
   for (const [k, f] of Object.entries(FONTS)) emb[k] = await doc.embedFont(f.bytes, { subset: true });
-  doc.setTitle(`${inv.kind === "estimate" ? "Estimate" : "Invoice"} ${inv.number}`);
+  doc.setTitle(`${docWord(inv, s)} ${inv.number}`);
   doc.setAuthor(s.business.name || "");
-  doc.setCreator("Ross Invoices");
-  doc.setProducer("Ross Invoices (web)");
-  run(new PdfPen(doc, emb), inv, s);
+  doc.setCreator(EDITION.name);
+  doc.setProducer(EDITION.name + " (web)");
+  const pen = new PdfPen(doc, emb);
+  const logo = s.business.logo || "";
+  if (logo) {
+    try {
+      pen.logoImg = logo.startsWith("data:image/png") ? await doc.embedPng(logo) : await doc.embedJpg(logo);
+    } catch (e) { console.warn("logo", e); }
+  }
+  run(pen, inv, s);
   return doc.save();
 }
 
@@ -546,6 +650,11 @@ export async function makePdf(inv, s) {
 export async function renderPages(inv, s, zoom = 1.5) {
   await loadFonts();
   const pen = new CanvasPen(zoom);
+  if (s.business.logo) {
+    const img = new Image();
+    img.src = s.business.logo;
+    try { await img.decode(); pen.logoImg = img; } catch (e) { console.warn("logo", e); }
+  }
   run(pen, inv, s);
   return pen.canvases;
 }

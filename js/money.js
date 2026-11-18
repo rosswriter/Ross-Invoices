@@ -138,17 +138,31 @@ export function shortDate(s) {                // 11 Nov 2026
 }
 
 // The UK tax year a date falls in, by its first year (6 April 2026 to 5 April 2027 is 2026).
+// The tax year: the UK's starts on 6 April; Grenada's is the calendar year.
+let YEAR_START = [4, 6];
+export function setYearStart(md) {
+  const [m, d] = String(md || "04-06").split("-").map(Number);
+  YEAR_START = [m || 4, d || 6];
+}
+export const calendarYears = () => YEAR_START[0] === 1 && YEAR_START[1] === 1;
+
 export function taxYearOf(s) {
   const d = toDate(s);
   if (!d) return null;
   const m = d.getMonth() + 1, day = d.getDate();
-  return (m > 4 || (m === 4 && day >= 6)) ? d.getFullYear() : d.getFullYear() - 1;
+  const [sm, sd] = YEAR_START;
+  return (m > sm || (m === sm && day >= sd)) ? d.getFullYear() : d.getFullYear() - 1;
 }
 
 export function taxYearLabel(y) {
+  if (calendarYears()) return String(y);
   return `${y}–${String((y + 1) % 100).padStart(2, "0")}`;
 }
 
 export function taxYearSpan(y) {
-  return [`${y}-04-06`, `${y + 1}-04-05`];
+  const [sm, sd] = YEAR_START;
+  const p = (n) => String(n).padStart(2, "0");
+  const start = `${y}-${p(sm)}-${p(sd)}`;
+  const endD = new Date(Date.UTC(y + 1, sm - 1, sd - 1));
+  return [start, endD.toISOString().slice(0, 10)];
 }
