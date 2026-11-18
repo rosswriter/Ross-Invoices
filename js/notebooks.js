@@ -2,7 +2,7 @@
 // same way as the laptop's notebooks.py (and notesio.html_to_markdown).
 // NoteCase Pro (.ncdb) is an SQLite file: read with sql.js, loaded only here.
 // FeatherNotes (.fnx) is XML with each note's words as Qt rich text (HTML).
-import * as md from "./md.js?v=2.1.2";
+import * as md from "./md.js?v=1.6.8";
 
 const OBJ = md.OBJ;
 const NC_TAGS = { 1: "b", 3: "i", 5: "u" };
@@ -181,15 +181,22 @@ export function count(tree) { return tree.reduce((a, n) => a + 1 + count(n.child
 
 // ------------------------------------------------------------------ Qt rich text -> lines (as Qt reads it)
 // images: (src) -> target parts (or null) for <img src>
-export async function qtHtmlLines(html, picture) {
+export async function qtHtmlLines(html, picture, opts = {}) {
   const doc = new DOMParser().parseFromString(html, "text/html");
-  const pre = /white-space\s*:\s*pre-wrap/.test(html);
+  const pre = opts.pre || /white-space\s*:\s*pre-wrap/.test(html);
   const lines = [];
   let cur = null;
+  // NobleNote: sizes against the note's usual size (the one most of its words are in), as text pasted from
+  // a web page keeps the size it had there
+  const rel = !!opts.relative;
+  const ptOf = (v) => { const q = /([\d.]+)\s*(pt|px)/.exec(v); return q ? (q[2] === "px" ? +q[1] * 0.75 : +q[1]) : null; };
+  let bodyPt = 10;
+  if (rel) { const bm = /<body[^>]*font-size\s*:\s*([\d.]+\s*(?:pt|px))/i.exec(html); if (bm) bodyPt = ptOf(bm[1]); }
   const sizeOf = (st) => {
     const m = /font-size\s*:\s*([^;"]+)/i.exec(st || "");
     if (!m) return null;
     const v = m[1].trim().toLowerCase();
+    if (rel) return ptOf(v);
     if (v === "xx-large" || v === "xxx-large") return 3;
     if (v === "x-large") return 2;
     if (v === "large") return 1;
@@ -209,7 +216,7 @@ export async function qtHtmlLines(html, picture) {
         if (!t) continue;
         if (!cur) { if (!t.trim()) continue; newLine(st.kind, st.depth); }
         cur.runs.push({ t, f: new Set(st.f), href: st.href });
-        if (t.trim()) cur.sizes.push(st.size || 0);
+        if (t.trim()) { cur.sizes.push(st.size || 0); if (rel) cur.chars = (cur.chars || []).concat(t.trim().length); }
         continue;
       }
       if (c.nodeType !== 1) continue;
@@ -217,8 +224,14 @@ export async function qtHtmlLines(html, picture) {
       if (["SCRIPT", "STYLE", "HEAD", "TITLE", "META"].includes(tag)) continue;
       if (tag === "BR") { if (cur) cur.runs.push({ t: " ", f: new Set(st.f), href: st.href }); continue; }
       if (tag === "IMG") {
-        const target = await picture(c.getAttribute("src") || "");
+        const src = c.getAttribute("src") || "";
+        const target = await picture(src);
         if (target) { if (!cur) newLine(st.kind, st.depth); cur.runs.push({ t: OBJ, f: new Set(), img: { src: "", size: "", target } }); }
+        else if (opts.webPictures && /^https?:\/\//i.test(src)) {
+          // a picture on the web: a link to it, as it isn't in the notebook
+          if (!cur) newLine(st.kind, st.depth);
+          cur.runs.push({ t: "picture", f: new Set(), href: src });
+        }
         continue;
       }
       const s2 = { ...st, f: new Set(st.f) };
@@ -232,7 +245,8 @@ export async function qtHtmlLines(html, picture) {
       if (/font-style\s*:\s*italic/i.test(style)) s2.f.add("i");
       if (/text-decoration[^;]*underline/i.test(style)) s2.f.add("u");
       if (/text-decoration[^;]*line-through/i.test(style)) s2.f.add("s");
-      if (/background-color\s*:\s*(?!transparent)[^;"]+/i.test(style)) s2.f.add("h");
+      const bg = /background-color\s*:\s*([^;"]+)/i.exec(style);
+      if (bg && !/transparent/i.test(bg[1]) && (!opts.relative || yellowish(bg[1]))) s2.f.add("h");
       const sz = sizeOf(style);
       if (sz != null) s2.size = sz;
       if (tag === "A" && c.getAttribute("href")) s2.href = c.getAttribute("href");
@@ -243,13 +257,26 @@ export async function qtHtmlLines(html, picture) {
       const block = ["P", "DIV", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "PRE", "BLOCKQUOTE", "TR"].includes(tag);
       if (block) {
         newLine(s2.kind, s2.depth);
+        // a paragraph's alignment (Qt writes align="center" on it), as the laptop keeps it
+        if (tag === "P" || /^H[1-6]$/.test(tag)) {
+          const a = (c.getAttribute("align") || (/text-align\s*:\s*([a-z]+)/i.exec(style) || [])[1] || "").toLowerCase();
+          const al = { center: "center", right: "right", justify: "justify" }[a];
+          if (al) cur.align = al;
+        }
         await walk(c, s2);
         cur = null;
       } else await walk(c, s2);
     }
   };
-  await walk(doc.body, { f: new Set(), href: null, kind: null, depth: 1, size: 0 });
+  await walk(doc.body, { f: new Set(), href: null, kind: null, depth: 1, size: rel ? bodyPt : 0 });
   await Promise.all(pending);
+  if (rel) {
+    const tally = new Map();
+    for (const ln of lines) (ln.sizes || []).forEach((pt, k) => tally.set(pt, (tally.get(pt) || 0) + ln.chars[k]));
+    const usual = [...tally].sort((a, b) => b[1] - a[1])[0];
+    const base = usual && usual[0] ? usual[0] : bodyPt;
+    for (const ln of lines) { ln.sizes = (ln.sizes || []).map((pt) => { const r = pt / base; return r >= 1.9 ? 3 : r >= 1.4 ? 2 : 0; }); delete ln.chars; }
+  }
   for (const ln of lines) {
     if (ln.kind === "ul" || ln.kind === "ol") {
       if (ln.depth > 1) {
@@ -275,4 +302,68 @@ export function tidyNote(text, title) {
   text = text.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
   if (title && md.titleOf(text).trim() !== title.trim()) text = title + "\n" + text;
   return text.trim() ? text.replace(/\n+$/, "") + "\n" : (title || "") + "\n";
+}
+
+// ------------------------------------------------------------------ a NobleNote folder
+// NobleNote keeps each notebook as a folder and each note as a file named after the note (no extension),
+// its words as Qt rich text (HTML). Some copies are bare HTML (no header), and a folder may also hold
+// Markdown or plain text notes. Anything else (settings, backups, programs, empty notes) is left out.
+// -> {tree: [{title, html | text, children}], skipped: {empty, other}, base}
+const NOBLE_SKIP_DIR = /^(\.|backups_)|^nobleNotebak$/i;
+const NOBLE_SKIP_FILE = /^\.|\.(base|canvas|json|bin|exe|zip|gz|png|jpe?g|gif|webp|bmp|pdf|docx?|odt|sqlite|db)$/i;
+const naturally = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+
+export function nobleKind(text) {
+  const head = text.slice(0, 400).trimStart().toLowerCase();
+  if (head.startsWith("<!doctype html") || head.startsWith("<html") || text.includes('name="qrichtext"')) return "html";
+  if (/^<(p|div|span|h[1-6]|ul|ol|table|br|b|i|font)[\s>/]/.test(head)) return "html";
+  return "text";
+}
+
+export function nobleWords(note) {
+  if (note.html != null) {
+    const body = note.html.replace(/<head[\s\S]*?<\/head>/i, "").replace(/<(style|script)[\s\S]*?<\/\1>/gi, "");
+    const doc = new DOMParser().parseFromString(body, "text/html");
+    return (doc.body ? doc.body.textContent : "").trim();
+  }
+  return (note.text || "").trim();
+}
+
+export async function readNobleFolder(dir, say = () => {}) {
+  const skipped = { empty: 0, other: 0 };
+  // a folder chosen one level up (the one holding nobleNote and its backups): its notebooks folder
+  const entries = async (d) => { const o = []; for await (const e of d.values()) o.push(e); return o; };
+  let base = dir;
+  const top = await entries(dir);
+  const inner = top.find((e) => e.kind === "directory" && e.name.toLowerCase() === "noblenote");
+  if (inner && !top.some((e) => e.kind === "directory" && !NOBLE_SKIP_DIR.test(e.name) && e !== inner)) base = inner;
+  let seen = 0;
+  const walk = async (d) => {
+    const kids = (await entries(d)).sort((a, b) => naturally(a.name, b.name));
+    const out = [];
+    for (const e of kids) {
+      if (e.kind === "directory") {
+        if (NOBLE_SKIP_DIR.test(e.name)) { skipped.other++; continue; }
+        const children = await walk(e);
+        if (children.length) out.push({ title: e.name, folder: true, children });
+        continue;
+      }
+      if (NOBLE_SKIP_FILE.test(e.name)) { skipped.other++; continue; }
+      const file = await e.getFile();
+      if (file.size > 64 * 1024 * 1024) { skipped.other++; continue; }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (bytes.subarray(0, 8192).includes(0)) { skipped.other++; continue; }   // not text
+      let text;
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch (err) { text = new TextDecoder("windows-1252").decode(bytes); }
+      text = text.replace(/^﻿/, "");
+      const title = e.name.replace(/\.(md|markdown|txt|html?)$/i, "").trim() || "Untitled";
+      const note = nobleKind(text) === "html" ? { title, html: text, children: [] } : { title, text, children: [] };
+      if (!nobleWords(note) && !/<img\b/i.test(note.html || "")) { skipped.empty++; continue; }
+      out.push(note);
+      if (++seen % 10 === 0) say(seen);
+    }
+    return out;
+  };
+  const tree = await walk(base);
+  return { tree, skipped, base: base.name };
 }

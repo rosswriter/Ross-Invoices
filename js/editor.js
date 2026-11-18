@@ -1,6 +1,6 @@
 // The page: one <div class="ln"> per line of the note, with the formatting as
 // ordinary elements. Read back to lines (md.js) to save.
-import * as md from "./md.js?v=2.1.2";
+import * as md from "./md.js?v=1.6.8";
 
 const HL = "#ffd54f";
 
@@ -18,6 +18,7 @@ export function lineElement(ln) {
   if (ln.mark) div.dataset.mark = ln.mark;
   if (ln.raw != null) div.dataset.raw = ln.raw;
   if (ln.code) div.dataset.code = "1";
+  if (ln.align && !ln.code && md.ALIGNS.includes(ln.align)) div.dataset.align = ln.align;
   for (const r of ln.runs) {
     if (r.img) { div.appendChild(pictureElement(r.img)); continue; }
     if (!r.t) continue;
@@ -95,6 +96,7 @@ export function readLine(div) {
   const ln = { kind, mark: div.dataset.mark || null, runs: [] };
   if (div.dataset.raw != null) ln.raw = div.dataset.raw;
   if (div.dataset.code) ln.code = true;
+  if (div.dataset.align && !ln.code && md.ALIGNS.includes(div.dataset.align)) ln.align = div.dataset.align;
   const heading = !!kind && kind[0] === "h";
   const walk = (n) => {
     for (const c of n.childNodes) {
@@ -141,6 +143,7 @@ export function tidy(page) {
           const nl = document.createElement("div");
           nl.className = "ln";
           if (c.dataset && c.dataset.kind) nl.dataset.kind = c.dataset.kind;
+          if (c.dataset && c.dataset.align) nl.dataset.align = c.dataset.align;
           while (c.firstChild) nl.appendChild(c.firstChild);
           c.remove();
           after.after(nl);
@@ -351,7 +354,15 @@ export function linesFromHtml(html) {
       if (t === "LI") kind2 = c.parentNode && c.parentNode.tagName === "OL" ? "ol" : "ul";
       if (t === "BLOCKQUOTE") kind2 = "quote";
       if (BLOCKS.has(t)) {
-        if (t !== "UL" && t !== "OL" && t !== "TABLE" && t !== "TBODY") newLine(kind2);
+        if (t !== "UL" && t !== "OL" && t !== "TABLE" && t !== "TBODY") {
+          newLine(kind2);
+          // a paragraph's or heading's own alignment (from Word or Ross Writer; not a web page's layout)
+          if (t === "P" || /^H[1-6]$/.test(t)) {
+            const a = ((/text-align\s*:\s*([a-z-]+)/i.exec(st) || [])[1] || c.getAttribute("align") || "").toLowerCase();
+            const al = { center: "center", right: "right", end: "right", justify: "justify" }[a];
+            if (al) cur.align = al;
+          }
+        }
         walk(c, f2, href2, kind2);
         cur = null;
       } else walk(c, f2, href2, kind2);

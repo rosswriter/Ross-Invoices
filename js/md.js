@@ -21,6 +21,9 @@ const QUOTE_RE = /^>\s?(.*)$/s;
 const FENCE_RE = /^\s{0,3}(```|~~~)/;
 const LIST_ITEM_RE = /^\s*([-*+]|\d+[.)])\s+\S/;
 const RULE_RE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
+// a line's alignment (Ross Note 1.6.8 / 1.9.3): <p align="center">…</p>, a heading <h2 align="center">…</h2>
+export const ALIGNS = ["center", "right", "justify"];
+const ALIGN_RE = /^<(p|h([1-6])) align="(center|right|justify)">(.*)<\/\1>$/s;
 const ALNUM = /[\p{L}\p{N}_]/u;     // Python's isalnum() (and "_" never matters here)
 
 function isalnum(c) { return !!c && /[\p{L}\p{N}]/u.test(c); }
@@ -197,7 +200,9 @@ export function parse(text) {
       lists.reset();
       continue;
     }
-    const ln = parseLine(line);
+    const am = ALIGN_RE.exec(line);
+    const ln = am ? parseLine(am[2] ? "#".repeat(+am[2]) + " " + am[4] : am[4]) : parseLine(line);
+    if (am) ln.align = am[3];
     const { number } = lists.step(ln);
     // a line that wouldn't be written back exactly is kept as it was
     if (line.trim() && lineMarkdown(ln, number, { asLoaded: true }) !== line) {
@@ -347,6 +352,13 @@ export function lineMarkdown(ln, number, opts = {}) {
   while (openNow.length) out.push(CLOSE[openNow.pop()]);
   out.push(pending);
   const body = out.join("");
+  const al = ALIGNS.includes(ln.align) ? ln.align : null;
+  if (al && heading) return `<${kind} align="${al}">${body}</${kind}>`;
+  const whole = lineOut(ln, kind, heading, body, number);
+  return al && body.trim() ? `<p align="${al}">${whole}</p>` : whole;
+}
+
+function lineOut(ln, kind, heading, body, number) {
   const mark = ln.mark;
   if (kind === "quote") return "> " + body;
   if (heading) return "#".repeat(+kind.slice(1)) + " " + body;
@@ -384,6 +396,8 @@ export function serialize(lines, opts = {}) {
 export function titleOf(text, limit = 80) {
   for (const line of text.split("\n")) {
     let s = line.trim();
+    const am = ALIGN_RE.exec(s);
+    if (am) s = am[4].trim();
     const m = BLOCK_RE.exec(s);
     if (m) s = (m[1] ? m[2] : m[4] ? m[6] : m[10]) || "";
     const q = QUOTE_RE.exec(s);
@@ -427,8 +441,16 @@ export function titleAsHeading(text, level) {
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k];
     if (line.trim()) {
-      const body = line.trimStart().startsWith("|") ? line.trim() : line.replace(MARKER, "").trim();
-      lines[k] = "#".repeat(Math.max(1, Math.min(6, level))) + " " + body;
+      const lv = Math.max(1, Math.min(6, level));
+      const am = ALIGN_RE.exec(line.trim());
+      if (am) {
+        // an aligned first line: the heading keeps its alignment
+        const inner = am[2] ? am[4] : am[4].replace(MARKER, "");
+        lines[k] = `<h${lv} align="${am[3]}">${inner.trim()}</h${lv}>`;
+      } else {
+        const body = line.trimStart().startsWith("|") ? line.trim() : line.replace(MARKER, "").trim();
+        lines[k] = "#".repeat(lv) + " " + body;
+      }
       // the note's own headings go down with it (not inside code)
       let fence = null;
       for (let j = k + 1; j < lines.length; j++) {
@@ -437,6 +459,8 @@ export function titleAsHeading(text, level) {
         if (f) { fence = f[1]; continue; }
         const h = /^(#{1,6})\s/.exec(lines[j]);
         if (h && level > 1) lines[j] = "#".repeat(Math.min(6, h[1].length + level - 1)) + lines[j].slice(h[1].length);
+        const ha = /^<h([1-6]) align="(center|right|justify)">(.*)<\/h\1>$/s.exec(lines[j]);
+        if (ha && level > 1) { const n = Math.min(6, +ha[1] + level - 1); lines[j] = `<h${n} align="${ha[2]}">${ha[3]}</h${n}>`; }
       }
       return lines.slice(k).join("\n").replace(/\n+$/, "") + "\n";
     }

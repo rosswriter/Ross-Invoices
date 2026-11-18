@@ -2,24 +2,38 @@
 @font-face { font-family: "Caladea"; src: url("../fonts/Caladea-Bold.woff2") format("woff2"); font-weight: 700; font-style: normal; font-display: swap; }
 @font-face { font-family: "Caladea"; src: url("../fonts/Caladea-Italic.woff2") format("woff2"); font-weight: 400; font-style: italic; font-display: swap; }
 @font-face { font-family: "Caladea"; src: url("../fonts/Caladea-BoldItalic.woff2") format("woff2"); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: "Literata"; src: url("../fonts/literata-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Literata"; src: url("../fonts/literata-latin-400-italic.woff2") format("woff2"); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: "Literata"; src: url("../fonts/literata-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "Literata"; src: url("../fonts/literata-latin-700-italic.woff2") format("woff2"); font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("../fonts/inter-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("../fonts/inter-latin-500-normal.woff2") format("woff2"); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("../fonts/inter-latin-600-normal.woff2") format("woff2"); font-weight: 600 700; font-style: normal; font-display: swap; }
 
 :root {
-  --ui: #f3f1ea; --ui2: #e8e4d6; --ui-ink: #2c2a24; --ui-muted: #7a7466; --line: #d4cfbd;
-  --paper: #fff9c4; --ink: #2b2a26; --quote: #6b6145; --link: #1a5fb4; --sel: #3d6fb8;
-  --head: #e8e2c0; --head-ink: #3a3524; --head-off: #f2eed8; --head-off-ink: #8a8470; --hl: #ffd54f; --hl-ink: inherit; --code: rgba(0,0,0,.05);
+  /* 1.6.8: Quiet Paper (light) */
+  --ui: #F6F1E6; --bar: #FBF8F1; --ui2: #ECE4D3; --ui-ink: #24211C; --ui-muted: #6B655B; --line: #E6DFD0;
+  --paper: #FBF8F1; --ink: #24211C; --quote: #5E5747; --link: #2F5D8A; --sel: #2F5D8A; --rowsel: #E6DCC6;
+  --accent: #2F5D8A; --dim: #9A9385;
+  --head: transparent; --head-ink: #6B655B; --head-off: transparent; --head-off-ink: #6B655B; --hl: #ffd54f; --hl-ink: inherit; --code: rgba(0,0,0,.05);
   --tb-hl: #ffd54f;
-  --size: 18px; --lh: 1.25; --gap: 0px;
+  --size: 18px; --lh: 1.25; --gap: 0px; --measure: 38em;
+  --pagefont: Literata, Cambria, Caladea, "Liberation Serif", "Noto Serif", serif;
+  --uifont: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
   color-scheme: light;
 }
 .dark {
-  --ui: #1e2023; --ui2: #2c2f34; --ui-ink: #e6e6e6; --ui-muted: #9aa0a8; --line: #3a3f47;
-  --paper: #2e2a1c; --ink: #ece3c4; --quote: #c9bf9a; --link: #8ab4f8;
-  --head: #3a3f47; --head-ink: #f0f0f0; --head-off: #2a2d32; --head-off-ink: #9aa0a8; --hl-ink: #1d1a10; --code: rgba(255,255,255,.06);
+  /* Night Desk */
+  --ui: #1B1A1F; --bar: #1B1A1F; --ui2: #2E2C33; --ui-ink: #E8E3D9; --ui-muted: #A39C90; --line: #2E2C33;
+  --paper: #1F1E23; --ink: #E8E3D9; --quote: #C9C1B0; --link: #E8A33D; --sel: #7A5A1E; --rowsel: #2E2C33;
+  --accent: #E8A33D; --dim: #77716A;
+  --head-ink: #A39C90; --head-off-ink: #A39C90; --hl-ink: #1d1a10; --code: rgba(255,255,255,.06);
   color-scheme: dark;
 }
+body.classicfont { --pagefont: Cambria, Caladea, "Liberation Serif", "Noto Serif", serif; }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--ui); color: var(--ui-ink);
-  font: 15px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif; }
+html, body { margin: 0; height: 100%; background: var(--bar); color: var(--ui-ink);
+  font: 15px/1.35 var(--uifont); }
 body { overscroll-behavior: none; }
 button { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
@@ -72,6 +86,23 @@ button { font: inherit; color: inherit; }
 #findbar button:hover { background: var(--ui2); }
 #findbar label { display: flex; align-items: center; gap: 4px; font-size: 14px; white-space: nowrap; }
 #find-count { min-width: 64px; font-size: 13px; color: var(--ui-muted); }
+/* spelling: a red wavy underline (drawn over the text; the note itself isn't changed) */
+::highlight(spell) { text-decoration: underline wavy #d32f2f; text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+.dark ::highlight(spell) { text-decoration-color: #ff6b6b; }
+#spellbar { position: fixed; z-index: 85; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; max-width: min(94vw, 560px);
+  padding: 8px; border-radius: 12px; background: var(--chrome, #fff); color: var(--ink, #222); border: 1px solid rgba(0, 0, 0, .15);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .22); font: 15px system-ui, sans-serif; }
+#spellbar[hidden] { display: none; }
+#spellbar button { min-height: 40px; padding: 6px 12px; border-radius: 8px; border: 1px solid rgba(0, 0, 0, .12); background: transparent;
+  color: inherit; font: inherit; cursor: pointer; }
+#spellbar button.sug { font-weight: 600; background: rgba(27, 82, 61, .09); border-color: rgba(27, 82, 61, .3); }
+#spellbar button.act { font-size: 14px; opacity: .85; }
+#spellbar .none { padding: 0 6px; opacity: .7; font-style: italic; }
+.dark #spellbar { background: #2a2d31; color: #eee; border-color: rgba(255, 255, 255, .15); }
+.dark #spellbar button { border-color: rgba(255, 255, 255, .18); }
+.dark #spellbar button.sug { background: rgba(138, 180, 248, .14); border-color: rgba(138, 180, 248, .35); }
+@media print { #spellbar { display: none !important; } }
+
 ::highlight(find) { background-color: #ffd699; color: #1d1a10; }
 ::highlight(find-current) { background-color: #ff8f00; color: #000; }
 
@@ -94,12 +125,6 @@ button { font: inherit; color: inherit; }
 .row.cur .tw { color: #dfe8f7; }
 .row .lbl { overflow: hidden; text-overflow: ellipsis; }
 .row.match .lbl { font-weight: 600; }
-.row .flag { flex: none; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
-.row .ro { flex: none; margin-left: 8px; padding: 0 5px; border: 1px solid var(--line); border-radius: 3px;
-  font-size: 11px; color: var(--ui-muted); }
-.row.cur .ro { color: #dfe8f7; border-color: #9fb6dc; }
-.pane.readonly .page { background: var(--ui); }
-.pane.readonly .head .hname { font-style: italic; }
 #count { padding: 4px 8px calc(4px + env(safe-area-inset-bottom)); font-size: 12px; color: var(--ui-muted);
   border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #divider { flex: none; width: 7px; cursor: col-resize; background: var(--ui2); border-right: 1px solid var(--line);
@@ -117,36 +142,7 @@ button { font: inherit; color: inherit; }
 .head .hname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .head .hwords { flex: none; font-weight: 400; opacity: .75; font-variant-numeric: tabular-nums; }
 .split .pane:not(.active) .head { background: var(--head-off); color: var(--head-off-ink); font-weight: 400; }
-.pbody { flex: 1; min-height: 0; display: flex; }
-.pbody .scroller { flex: 1; min-width: 0; }
 .scroller { flex: 1; overflow: auto; background: var(--paper); -webkit-overflow-scrolling: touch; }
-/* a scene's Word comments, beside the page (under it when the pane is narrow) */
-.cpanel { flex: none; width: 300px; overflow: auto; background: var(--ui); border-left: 1px solid var(--line);
-  font-size: 13px; -webkit-overflow-scrolling: touch; }
-.pane.cbelow .pbody { flex-direction: column; }
-.pane.cbelow .cpanel { width: auto; max-height: 38%; border-left: 0; border-top: 1px solid var(--line); }
-.cpanel .ctop { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 10px; background: var(--ui); border-bottom: 1px solid var(--line); font-weight: 600; }
-.cpanel .ctop button { border: 0; background: none; font: inherit; color: var(--ui-muted); cursor: pointer; padding: 2px 6px; }
-.cpanel .citem { margin: 8px; padding: 8px 10px; background: var(--paper); border: 1px solid var(--line);
-  border-left: 3px solid #e6c229; border-radius: 4px; cursor: pointer; }
-.cpanel .citem.reply { margin-left: 24px; border-left-color: var(--line); }
-.cpanel .citem.done { opacity: .6; }
-.cpanel .cwho { font-size: 12px; color: var(--ui-muted); margin-bottom: 4px; }
-.cpanel .cwords { font-style: italic; color: var(--ui-muted); margin-bottom: 4px; }
-.cpanel .ctext { white-space: pre-wrap; }
-.cpanel .cacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-.cpanel .cacts button { border: 1px solid var(--line); background: var(--ui); color: var(--ui-ink); border-radius: 3px;
-  font: inherit; font-size: 12px; padding: 3px 8px; min-height: 28px; cursor: pointer; }
-.cform { display: flex; flex-direction: column; gap: 10px; min-width: min(420px, 80vw); }
-.cform label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.cform input, .cform textarea { font: inherit; font-size: 15px; padding: 6px 8px; border: 1px solid var(--line);
-  border-radius: 4px; background: var(--paper); color: var(--ink, inherit); }
-.cform textarea { width: 100%; box-sizing: border-box; resize: vertical; }
-.cform .cquote { font-style: italic; color: var(--ui-muted); }
-.head .hcomments { flex: none; border: 1px solid currentColor; border-radius: 10px; background: none; color: inherit;
-  font: inherit; font-size: 12px; font-weight: 400; padding: 0 8px; opacity: .8; cursor: pointer; }
-.head .hcomments.on { opacity: 1; background: rgba(255,255,255,.15); }
 .app-narrow #side { position: absolute; z-index: 5; top: 0; bottom: 0; left: 0; width: min(85vw, 340px);
   box-shadow: 2px 0 12px rgba(0,0,0,.25); }
 .app-narrow #divider { display: none; }
@@ -154,13 +150,16 @@ button { font: inherit; color: inherit; }
 
 /* the note */
 .page { min-height: 100%; padding: 18px 22px 40vh; outline: none; background: var(--paper); color: var(--ink);
-  font-family: Cambria, Caladea, "Liberation Serif", "Noto Serif", serif; font-size: var(--size);
+  font-family: var(--pagefont); font-size: var(--size);
   line-height: var(--lh); caret-color: var(--ink); overflow-wrap: anywhere; -webkit-text-size-adjust: 100%; }
 .page ::selection { background: var(--sel); color: #fff; }
 .ln { margin: 0 0 var(--gap); min-height: calc(var(--size) * var(--lh)); position: relative; white-space: pre-wrap; }
 .ln.title { -webkit-text-stroke: 0.035em currentColor; }    /* the title shows bold (on screen only) */
 .ln[data-kind^="h"] { font-weight: 700; line-height: 1.25; margin-top: .25em; }
 .ln[data-kind="h1"] { font-size: 2em; }
+.ln[data-align="center"] { text-align: center; }
+.ln[data-align="right"] { text-align: right; }
+.ln[data-align="justify"] { text-align: justify; }
 .ln[data-kind="h2"] { font-size: 1.5em; }
 .ln[data-kind="h3"] { font-size: 1.2em; }
 .ln[data-kind="ul"], .ln[data-kind="ol"] { padding-left: calc(var(--d, 1) * 1.6em + .2em); }
@@ -198,6 +197,23 @@ button { font: inherit; color: inherit; }
   max-width: min(92vw, 560px); padding: 9px 14px; border-radius: 8px; background: #333; color: #fff; font-size: 14px;
   box-shadow: 0 4px 16px rgba(0,0,0,.3); }
 
+/* working on it: a moving bar along the top, and what it is (above everything, the start screen too) */
+#busy:not(.boot) { position: fixed; z-index: 90; top: 0; left: 0; right: 0; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; }
+#busy[hidden] { display: none !important; }
+#busy:not(.boot) .bar { align-self: stretch; height: 4px; overflow: hidden; position: relative; background: rgba(27, 82, 61, .18); }
+#busy:not(.boot) .bar::after { content: ""; position: absolute; top: 0; bottom: 0; left: -40%; width: 40%;
+  background: #1b523d; border-radius: 2px; animation: busy-run 1.1s ease-in-out infinite; }
+.dark #busy:not(.boot) .bar { background: rgba(138, 180, 248, .18); }
+.dark #busy:not(.boot) .bar::after { background: #8ab4f8; }
+@keyframes busy-run { from { left: -40%; } to { left: 100%; } }
+#busy:not(.boot) .txt { margin-top: calc(104px + env(safe-area-inset-top)); max-width: min(92vw, 560px); padding: 7px 14px;
+  border-radius: 18px; background: #333; color: #fff; font-size: 14px; line-height: 1.3; text-align: center;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .28); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#busy.quiet .txt { display: none; }
+@media (prefers-reduced-motion: reduce) { #busy:not(.boot) .bar::after { animation-duration: 3s; } }
+@media print { #busy { display: none !important; } }
+
 /* the start: choosing the folder */
 #start { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
   background: var(--ui); padding: 20px; }
@@ -216,12 +232,6 @@ button { font: inherit; color: inherit; }
   #printdoc .part.newpage { break-before: page; }
   .page span[style*="background"] { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   #printdoc .part.gap { margin-top: 18pt; }
-  #printdoc .pcomments { margin-top: 12pt; padding-top: 6pt; border-top: 0.5pt solid #999; font-size: 9.5pt; break-inside: auto; }
-  #printdoc .pch { font-weight: 700; margin-bottom: 4pt; }
-  #printdoc .pc { margin: 0 0 6pt; padding-left: 6pt; border-left: 2pt solid #e6c229; break-inside: avoid; }
-  #printdoc .pc.reply { margin-left: 14pt; border-left-color: #bbb; }
-  #printdoc .pcwho { color: #555; font-size: 8.5pt; }
-  #printdoc .pcwords { font-style: italic; color: #444; }
   html, body, #app { height: auto; background: #fff; }
   #menubar, #findbar, #dialog, #toolbar, #side, #divider, #pdiv, .head, #chip, #menu, #toast, #start, .pane:not(.active) { display: none !important; }
   #main, #panes, .pane, .scroller { display: block; overflow: visible; background: #fff; }
@@ -233,3 +243,159 @@ button { font: inherit; color: inherit; }
   .page img.pic.sel { outline: none; }
   @page { margin: 20mm; }
 }
+
+/* ------------------------------------------------------------------ 1.8.0 */
+/* the word count: the lower right corner, always there */
+#wc { position: fixed; right: 14px; bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 40; padding: 5px 12px;
+  border-radius: 14px; background: var(--ui); color: var(--ui-ink); border: 1px solid var(--line); font: 13px system-ui, sans-serif;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .12); cursor: pointer; white-space: nowrap; user-select: none; font-variant-numeric: tabular-nums; }
+#wc:empty { display: none; }
+#wc .more { color: var(--ui-muted); }
+#wc:hover { border-color: var(--ui-muted); }
+.pane .head .hwords { display: none; }
+@media print { #wc, #results, #popnote { display: none !important; } }
+
+/* page view (Ctrl+Shift+L): a page-wide column in the middle, as Ross Writer's page view */
+body.pageview .page { max-width: 44em; margin: 0 auto; box-shadow: 0 0 0 1px var(--line), 0 4px 18px rgba(0, 0, 0, .08); }
+body.pageview .scroller { background: var(--ui2); }
+
+/* Find: where to look; List All */
+#find-scope { height: 32px; border-radius: 6px; border: 1px solid var(--line); background: var(--ui); color: var(--ui-ink); font: inherit; font-size: 14px; }
+#results { position: fixed; z-index: 45; top: 110px; right: 12px; bottom: 56px; width: min(420px, 92vw); display: flex; flex-direction: column;
+  background: var(--ui); color: var(--ui-ink); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 28px rgba(0, 0, 0, .22); }
+#results[hidden] { display: none; }
+#results .rhead { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); font: 600 14px system-ui, sans-serif; }
+#results .rtitle { flex: 1; }
+#results .rclose, #popnote .pclose { border: 0; background: none; color: inherit; font-size: 20px; cursor: pointer; padding: 0 6px; }
+#results .rlist { overflow: auto; padding: 4px 0; font: 14px system-ui, sans-serif; }
+#results .rnote { padding: 8px 14px 2px; font-weight: 600; color: var(--ui-muted); font-size: 12px; text-transform: none; }
+#results .rnote .ro { font-weight: 400; font-style: italic; }
+#results .ritem { display: block; width: 100%; text-align: left; border: 0; background: none; color: inherit; padding: 5px 14px 5px 22px;
+  font: inherit; line-height: 1.35; cursor: pointer; }
+#results .ritem:hover, #results .ritem.cur { background: var(--ui2); }
+#results .ritem mark { background: #ffe07a; color: #222; border-radius: 2px; padding: 0 1px; }
+
+/* the pop-up note: a small notepad over whatever you're working on */
+#popnote { position: fixed; z-index: 46; width: 320px; height: 260px; min-width: 220px; min-height: 140px; resize: both; overflow: hidden;
+  display: flex; flex-direction: column; background: #fff8c5; color: #2b2a22; border: 1px solid #d8cc7a; border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .25); }
+#popnote[hidden] { display: none; }
+#popnote .phead { display: flex; align-items: center; padding: 4px 4px 4px 12px; background: #f2e58e; cursor: move; user-select: none;
+  font: 600 13px system-ui, sans-serif; border-bottom: 1px solid #d8cc7a; }
+#popnote .phead span { flex: 1; }
+#popnote textarea { flex: 1; border: 0; outline: none; resize: none; padding: 10px 12px; background: transparent; color: inherit;
+  font: 16px/1.4 Cambria, Caladea, "Liberation Serif", serif; }
+.dark #popnote { background: #3a3726; color: #eee6b8; border-color: #5c5636; }
+.dark #popnote .phead { background: #4a4530; border-color: #5c5636; }
+/* Go To and Recent: a list to pick from */
+#dialog .goto input.wide { width: 100%; height: 42px; padding: 6px 12px; box-sizing: border-box; font: inherit; font-size: 17px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); margin-bottom: 8px; }
+#dialog .golist { max-height: 55vh; overflow: auto; display: flex; flex-direction: column; }
+#dialog .goitem { display: flex; flex-direction: column; align-items: flex-start; text-align: left; border: 0; border-radius: 6px;
+  background: none; color: inherit; padding: 7px 10px; font: inherit; cursor: pointer; }
+#dialog .goitem small { color: var(--ui-muted); font-size: 12px; }
+#dialog .goitem:hover, #dialog .goitem.cur { background: var(--ui2); }
+
+
+/* ------------------------------------------------------------------ 1.6.8: the new look (Quiet Paper / Night Desk) */
+/* the top bar: the list's button, the menus, where you are, Find or do anything, light / dark */
+#topbar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; padding-top: calc(6px + env(safe-area-inset-top));
+  background: var(--bar); border-bottom: 1px solid var(--line); flex: none; min-width: 0; }
+#topbar #menubar { background: transparent; border: 0; padding: 0; flex: 0 1 auto; min-width: 0; overflow-x: auto; }
+#menubar button { height: 32px; padding: 0 9px; font-size: 14px; color: var(--ui-ink); }
+.tbtn { flex: none; width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: var(--ui-muted);
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.tbtn:hover { background: var(--ui2); color: var(--ui-ink); }
+#crumb { flex: 1 1 120px; min-width: 0; padding: 0 10px; color: var(--ui-muted); font-size: 14px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; text-align: center; }
+#crumb b { color: var(--ui-ink); font-weight: 500; }
+#crumb .nb { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 6px; vertical-align: 0; }
+#b-cmd { flex: none; height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper);
+  color: var(--ui-ink); display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; }
+#b-cmd:hover { border-color: var(--ui-muted); }
+#b-cmd kbd { font: inherit; font-size: 12px; color: var(--ui-muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+#b-dark .sun, .dark #b-dark .moon { display: none; }
+.dark #b-dark .sun { display: inline; color: var(--accent); }
+@media (max-width: 900px) { #b-cmd .lab { display: none; } #crumb { text-align: left; } }
+@media (max-width: 620px) { #crumb { display: none; } }
+
+/* the list */
+#side { background: var(--ui); border-right: 1px solid var(--line); }
+#side-top { padding: 12px 10px 6px; }
+#search { height: 34px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+#treebar button { color: var(--ui-muted); border-radius: 6px; }
+#treebar button:hover { color: var(--ui-ink); }
+#tree { padding: 4px 8px 12px; }
+.row { min-height: 34px; border-radius: 6px; margin: 1px 0; padding-right: 8px; }
+.row:hover { background: var(--ui2); }
+.row.cur { background: var(--rowsel); color: var(--ui-ink); font-weight: 500; }
+.row.cur .tw { color: var(--ui-muted); }
+.row .nb { flex: none; width: 9px; height: 9px; border-radius: 3px; margin-right: 8px; }
+.row .lbl { flex: 1; min-width: 0; }
+.row .wn { flex: none; margin-left: 10px; color: var(--ui-muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+body.nowordlist .row .wn { display: none; }
+#count { border-top: 1px solid var(--line); padding: 6px 12px; }
+#divider { width: 6px; background: transparent; border-right: 1px solid var(--line); }
+#divider:hover, #divider.on { background: var(--ui2); }
+#pdiv { background: transparent; }
+
+/* the page: a column of comfortable width on the paper, the notebook's colour along the top */
+.scroller { background: var(--paper); }
+.page { max-width: calc(var(--measure) + 72px); margin: 0 auto; padding: 44px 36px 40vh; }
+body.fullwidth .page { max-width: none; }
+.head { border-top: 3px solid var(--nb, transparent); background: transparent; color: var(--head-ink); font-weight: 400;
+  padding: 0 16px; min-height: 0; }
+.head .hname { display: none; }
+#panes.split .head { padding: 6px 16px; }
+#panes.split .head .hname { display: block; }
+#panes.split .pane.active .head { color: var(--ui-ink); font-weight: 600; }
+body.pageview .scroller { background: var(--ui); }
+body.pageview .page { max-width: calc(var(--measure) + 120px); margin: 24px auto; padding: 56px 60px 40vh; border-radius: 4px;
+  border-top: 4px solid var(--nb, var(--line)); box-shadow: 0 0 0 1px var(--line), 0 6px 22px rgba(0, 0, 0, .08); }
+body.pageview .head { border-top-color: transparent; }
+
+/* the status bar: saved, modes, today's words, the word count (lower right) */
+#status { flex: none; display: flex; align-items: center; gap: 16px; padding: 5px 16px calc(5px + env(safe-area-inset-bottom));
+  background: var(--bar); border-top: 1px solid var(--line); color: var(--ui-muted); font-size: 13px; min-height: 32px; }
+#saved { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#saved.ok { color: #4E7A4B; }
+.dark #saved.ok { color: #8DB58A; }
+#modes { color: var(--accent); white-space: nowrap; }
+#goal { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; white-space: nowrap; }
+#goal .track { stroke: var(--line); }
+#goal .done { stroke: var(--accent); transition: stroke-dashoffset .4s; }
+#goal .txt b { color: var(--ui-ink); font-weight: 600; }
+#wc { position: static; padding: 2px 6px; border: 0; border-radius: 6px; background: transparent; box-shadow: none; color: var(--ui-muted);
+  font: inherit; font-variant-numeric: tabular-nums; }
+#wc b { color: var(--ui-ink); font-weight: 600; }
+#wc:hover { background: var(--ui2); }
+@media print { #status, #topbar, #fmtbar { display: none !important; } }
+
+/* the bar over a selection */
+#fmtbar { position: fixed; z-index: 22; display: flex; align-items: center; gap: 2px; padding: 4px; border-radius: 10px;
+  background: #24211C; color: #FBF8F1; box-shadow: 0 6px 20px rgba(36, 33, 28, .22); font: 13px var(--uifont); }
+.dark #fmtbar { background: #3A3842; color: #F2EEE6; }
+#fmtbar button { min-width: 32px; height: 30px; padding: 0 7px; border: 0; border-radius: 6px; background: transparent; color: inherit;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; }
+#fmtbar button:hover, #fmtbar button.on { background: rgba(255, 255, 255, .14); }
+#fmtbar .hlb { color: #F2C94C; font-weight: 600; }
+#fmtbar .fsep { width: 1px; height: 18px; background: rgba(255, 255, 255, .2); margin: 0 3px; }
+
+/* focus: the paragraph you're in, the others faded */
+body.focus .page .ln { color: var(--dim); transition: color .2s; }
+body.focus .page .ln.here { color: var(--ink); }
+body.focus .page .ln.here[data-kind="quote"] { color: var(--quote); }
+
+/* menus, dialogs, the pop-up note in the new look */
+#menu { background: var(--bar); border-color: var(--line); border-radius: 10px; }
+#dialog .box { background: var(--bar); border-radius: 12px; }
+.big.main { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dark .big.main { color: #1B1A1F; }
+#toolbar { background: var(--bar); }
+#dialog .palette .goitem { flex-direction: row; justify-content: space-between; align-items: center; gap: 12px; width: 100%; min-height: 38px; }
+#dialog .palette .goitem span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#dialog .palette .goitem small { flex: none; }
+#dialog .palette .goitem .k { color: var(--ui-muted); font-size: 12px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+#dialog .colours { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 14px; }
+#dialog .colours button { width: 40px; height: 40px; border-radius: 10px; border: 2px solid transparent; cursor: pointer; }
+#dialog .colours button.on { border-color: var(--ui-ink); }

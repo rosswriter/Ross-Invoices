@@ -6,7 +6,7 @@
 //   Word Copies/          a Word document kept for a note, as the tree (not a note)
 //   .order                the order of the notes in a folder (JSON list of names)
 //   .trash/<time>/        deleted notes
-import { safeName, titleOf } from "./md.js?v=2.1.2";
+import { safeName, titleOf } from "./md.js?v=1.6.8";
 
 export const EXT = ".md";
 export const ORDER = ".order";
@@ -89,15 +89,59 @@ async function moveEntry(fromDir, name, toDir, newName, kind) {
   await fromDir.removeEntry(name, { recursive: kind === "directory" });
 }
 
+// at most this many file reads at once (Android's document provider answers each call slowly, so reading
+// several at a time is much quicker than one after another; more than this gains little)
+const AT_ONCE = 8;
+let running = 0;
+const waiting = [];
+async function limited(fn) {
+  if (running >= AT_ONCE) await new Promise((ok) => waiting.push(ok));
+  running++;
+  try { return await fn(); } finally {
+    running--;
+    const next = waiting.shift();
+    if (next) next();
+  }
+}
+
 export class Store {
   constructor(rootHandle) {
     this.handle = rootHandle;
     this.root = new Note(null, "");
+    this.dirs = new Map();        // folder handles already found ("a/b" -> handle): each lookup is a slow call
+    this.wordCopies = new Map();  // note key -> has a Word copy (asked once, not on every save)
+    this.onProgress = null;       // (notes read so far) while reading the folder
   }
 
+  // a text file at the top of the folder (the spelling dictionary): [text or null, its time]
+  async readTop(name) {
+    try {
+      const f = await (await this.handle.getFileHandle(name)).getFile();
+      return [await f.text(), f.lastModified];
+    } catch (e) { return [null, 0]; }
+  }
+
+  async writeTop(name, text) {
+    const fh = await writeFile(this.handle, name, text);
+    return (await fh.getFile()).lastModified;
+  }
+
+  // folders were renamed, moved or removed: find them afresh
+  forget() { this.dirs.clear(); this.wordCopies.clear(); }
+
   async dir(parts, create = false) {
-    let d = this.handle;
-    for (const p of parts) d = await d.getDirectoryHandle(p, { create });
+    const key = parts.join("/");
+    const known = this.dirs.get(key);
+    if (known) return known;
+    let d = this.handle, at = [];
+    for (const p of parts) {
+      at.push(p);
+      const k = at.join("/");
+      const h = this.dirs.get(k);
+      if (h) { d = h; continue; }
+      d = await d.getDirectoryHandle(p, { create });
+      this.dirs.set(k, d);
+    }
     return d;
   }
 
@@ -106,6 +150,9 @@ export class Store {
     const root = new Note(null, "");
     // what we've read already isn't read again unless it changed
     this.known = new Map([...this.root.walk()].map((n) => [n.key(), n]));
+    this.dirs.clear();
+    this.wordCopies.clear();
+    this.readCount = 0;
     root.children = await this.scanDir(root, this.handle);
     this.root = root;
     return root;
@@ -134,18 +181,26 @@ export class Store {
     const names = [...files.keys()];
     const ordered = [...order.filter((n) => files.has(n)),
       ...names.filter((n) => !order.includes(n)).sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0)];
-    const out = [];
-    for (const name of ordered) {
+    // the notes in this folder, and the folders under it, read side by side
+    const out = await Promise.all(ordered.map(async (name) => {
       const note = new Note(parent, name);
-      try {
-        const f = await files.get(name).getFile();
-        note.modified = f.lastModified;
-        const o = this.known && this.known.get(note.key());
-        note.text = o && o.modified === f.lastModified && o.text != null ? o.text : await f.text();
-      } catch (e) { note.text = ""; }
-      if (dirs.includes(name)) note.children = await this.scanDir(note, await d.getDirectoryHandle(name));
-      out.push(note);
-    }
+      await limited(async () => {
+        try {
+          const f = await files.get(name).getFile();
+          note.modified = f.lastModified;
+          const o = this.known && this.known.get(note.key());
+          note.text = o && o.modified === f.lastModified && o.text != null ? o.text : await f.text();
+        } catch (e) { note.text = ""; }
+      });
+      this.readCount++;
+      if (this.onProgress) this.onProgress(this.readCount);
+      if (dirs.includes(name)) {
+        const sub = await limited(() => d.getDirectoryHandle(name));
+        this.dirs.set(note.childParts().join("/"), sub);
+        note.children = await this.scanDir(note, sub);
+      }
+      return note;
+    }));
     return out;
   }
 
@@ -164,9 +219,16 @@ export class Store {
   async read(note) {
     const d = await this.dir(note.folderParts());
     const f = await (await d.getFileHandle(note.name + EXT)).getFile();
+    // unchanged since we read it: what we have is it (reading the words again is the slow part)
+    if (note.text != null && note.modified && f.lastModified === note.modified) return note.text;
     note.text = await f.text();
     note.modified = f.lastModified;
     return note.text;
+  }
+
+  // several notes at once (for exports, counts and Word copies)
+  async readAll(notes) {
+    await Promise.all(notes.map((n) => limited(async () => { try { await this.read(n); } catch (e) { /* as we had it */ } })));
   }
 
   // the file's state now: {modified, text} (text only if it changed since we last saw it)
@@ -196,13 +258,19 @@ export class Store {
   }
 
   async hasWordCopy(note) {
-    const [dirs, name] = this.wordPlace(note.key());
-    try { return await exists(await this.dir(dirs), name, "file"); } catch (e) { return false; }
+    const key = note.key();
+    if (this.wordCopies.has(key)) return this.wordCopies.get(key);
+    const [dirs, name] = this.wordPlace(key);
+    let has = false;
+    try { has = await exists(await this.dir(dirs), name, "file"); } catch (e) { has = false; }
+    this.wordCopies.set(key, has);
+    return has;
   }
 
   async writeWordCopy(note, blob) {
     const [dirs, name] = this.wordPlace(note.key());
     await writeFile(await this.dir(dirs, true), name, blob);
+    this.wordCopies.set(note.key(), true);
     return [...dirs, name].join("/");
   }
 
@@ -220,6 +288,7 @@ export class Store {
       if (hasFile) await moveEntry(from, on, to, nn, "file");
       if (hasDir) await moveEntry(from, stemO, to, stemN, "directory");
     } catch (e) { /* left where it was */ }
+    this.forget();
   }
 
   async writeOrder(parent) {
@@ -232,7 +301,7 @@ export class Store {
         try { await d.removeEntry(ORDER); } catch (e) { /* none */ }
         let empty = true;
         for await (const _ of d.keys()) { empty = false; break; }
-        if (empty) await up.removeEntry(parts[parts.length - 1]);
+        if (empty) { await up.removeEntry(parts[parts.length - 1]); this.forget(); }
       } catch (e) { /* no folder */ }
       return;
     }
@@ -264,6 +333,20 @@ export class Store {
     return note;
   }
 
+  // a note made in one go (imports): named from its title, written once; the folder's order is written
+  // by the caller when all its notes are made (writeOrder), not after each one
+  async addNote(parent, index, title, textFor) {
+    const name = await this.uniqueName(parent, title || "Untitled");
+    const note = new Note(parent, name);
+    if (index == null) parent.children.push(note); else parent.children.splice(index, 0, note);
+    const text = typeof textFor === "function" ? await textFor(note) : (textFor || "");
+    const d = await this.dir(note.folderParts(), true);
+    const fh = await writeFile(d, note.name + EXT, text);
+    note.text = text;
+    note.modified = (await fh.getFile()).lastModified;
+    return note;
+  }
+
   // the note's name follows its title; its folder (the notes under it) goes with it
   async rename(note, title) {
     const parent = note.parent;
@@ -274,6 +357,7 @@ export class Store {
     await moveEntry(d, note.name + EXT, d, name + EXT, "file");
     if (await exists(d, note.name, "directory")) await moveEntry(d, note.name, d, name, "directory");
     note.name = name;
+    this.forget();
     await this.writeOrder(parent);
     await this.moveWordCopy(oldKey, note.key());
     return true;
@@ -299,6 +383,7 @@ export class Store {
     if (await exists(from, note.name, "directory")) await moveEntry(from, note.name, to, name, "directory");
     note.parent = newParent;
     note.name = name;
+    this.forget();
     newParent.children.splice(Math.max(0, Math.min(index, newParent.children.length)), 0, note);
     await this.writeOrder(oldParent);
     await this.writeOrder(newParent);
@@ -325,6 +410,7 @@ export class Store {
     } catch (e) { /* no Word copy */ }
     const parent = note.parent;
     parent.children.splice(parent.children.indexOf(note), 1);
+    this.forget();
     await this.writeOrder(parent);
   }
 
