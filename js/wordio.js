@@ -1,7 +1,7 @@
 // Word documents (.docx) in and out, the same way as the laptop's wordio.py.
 // In: a .docx becomes lines (md.js's line model); out: lines become a .docx.
 // Only loaded when you import or export, so the app stays quick to open.
-import * as md from "./md.js?v=1.6.8";
+import * as md from "./md.js?v=1.8.3";
 
 const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -10,6 +10,11 @@ const V = "urn:schemas-microsoft-com:vml";
 const PR = "http://schemas.openxmlformats.org/package/2006/relationships";
 const DC = "http://purl.org/dc/elements/1.1/";
 const OBJ = md.OBJ;
+// RossDraft 1.2: a footnote's or endnote's mark in the text: "\uE000f17\uE001" (f footnote, e endnote, then the
+// note's id in the Word file). The page shows it as its number; the note's words are the scene's (fnotes).
+export const NOTE_A = "\uE000", NOTE_Z = "\uE001";
+export const NOTE_RE = /\uE000([fe])(-?\d+)\uE001/g;
+export const noteToken = (kind, id) => NOTE_A + (kind === "endnote" || kind === "e" ? "e" : "f") + id + NOTE_Z;
 
 // ================================================================ zip
 const CRC = (() => {
@@ -211,8 +216,10 @@ function tidyRuns(runs) {
 const sameSet = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
 
 // {lines (wordio's: kind, depth, runs, code, title), media: Map(name -> Uint8Array), title}
-export async function readDocx(buf) {
-  const files = await unzip(buf);
+// opts.keep (a Ross Writer scene): every line as it is (no empty lines taken out), each with .src, the
+// place of its paragraph in the body, so a scene can be written back with the untouched paragraphs as they were
+export async function readDocx(buf, opts = {}) {
+  const files = opts.files || await unzip(buf);
   const text = async (p) => (files.has(p) ? new TextDecoder().decode(await files.get(p)()) : null);
   const docText = await text("word/document.xml");
   if (!docText) throw new Error("not a Word document");
@@ -270,6 +277,7 @@ export async function readDocx(buf) {
         if (c.namespaceURI === W) {
           const t = c.localName;
           if (t === "t") { if (c.textContent) out.push({ t: c.textContent, f: new Set(f), href }); }
+          else if (t === "footnoteReference" || t === "endnoteReference") out.push({ t: noteToken(t[0], wv(c, "id")), f: new Set(f), href });
           else if (t === "tab" || t === "ptab") out.push({ t: " ", f: new Set(f), href });
           else if (t === "br" || t === "cr") { if (wv(c, "type") !== "page") out.push(null); }
           else if (t === "noBreakHyphen") out.push({ t: "-", f: new Set(f), href });
@@ -363,18 +371,41 @@ export async function readDocx(buf) {
     });
   };
 
-  const block = (el) => {
-    for (const c of el.children) {
-      if (c.namespaceURI !== W) continue;
-      if (c.localName === "p") lines.push(...paragraph(c));
-      else if (c.localName === "tbl") table(c);
+  const block = (el, top) => {
+    [...el.children].forEach((c, idx) => {
+      if (c.namespaceURI !== W) return;
+      if (c.localName === "p") {
+        const ls = paragraph(c);
+        if (top) ls.forEach((ln) => { ln.src = idx; });
+        lines.push(...ls);
+      } else if (c.localName === "tbl") table(c);
       else if (c.localName === "sdt") { const sc = kid(c, "sdtContent"); if (sc) block(sc); }
       else if (c.localName === "ins" || c.localName === "customXml") block(c);
-    }
+    });
   };
   const body = kid(doc.documentElement, "body");
-  if (body) block(body);
+  if (body) block(body, true);
   await Promise.all(pending);
+  // the footnotes' and endnotes' words (separators left out), each note's paragraphs on lines of their own
+  const notes = new Map();
+  for (const [kind, part] of [["f", "word/footnotes.xml"], ["e", "word/endnotes.xml"]]) {
+    const t = await text(part);
+    if (!t) continue;
+    for (const n of xml(t).getElementsByTagNameNS(W, kind === "f" ? "footnote" : "endnote")) {
+      const ty = n.getAttributeNS(W, "type") || n.getAttribute("w:type");
+      if (ty === "separator" || ty === "continuationSeparator" || ty === "continuationNotice") continue;
+      const paras = [...n.getElementsByTagNameNS(W, "p")].map((p) => {
+        let s = "";
+        for (const el of p.getElementsByTagNameNS(W, "*")) {
+          if (el.localName === "t") s += el.textContent;
+          else if (el.localName === "tab") s += " ";
+        }
+        return s;
+      });
+      notes.set(kind + (n.getAttributeNS(W, "id") || n.getAttribute("w:id")), paras.join("\n").replace(/^\s+/, ""));
+    }
+  }
+  if (opts.keep) return { lines, media, title, files, docText, notes };
   const tidy = [];
   for (const ln of lines) {
     const empty = !ln.runs.some((r) => r.t.trim()) && !ln.kind;
@@ -443,7 +474,46 @@ const HEAD_PT = { 1: 20, 2: 16, 3: 14, 4: 12, 5: 12, 6: 12 };
 const x = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const xa = (s) => x(s).replace(/"/g, "&quot;");
 
-function stylesXml(font) {
+export const NOTE_STYLES =
+  '<w:style w:type="paragraph" w:styleId="FootnoteText"><w:name w:val="footnote text"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>' +
+  '<w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="footnote reference"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="EndnoteText"><w:name w:val="endnote text"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>' +
+  '<w:style w:type="character" w:styleId="EndnoteReference"><w:name w:val="endnote reference"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>';
+
+// a note's paragraphs (its words, a line each), the first starting with its number, as Word writes them
+export function noteParasXml(kind, text, styled = true) {
+  const k = kind === "e" || kind === "endnote" ? "endnote" : "footnote";
+  const Ref = k === "footnote" ? "Footnote" : "Endnote";
+  return String(text || "").split("\n").map((line, i) =>
+    `<w:p>${styled ? `<w:pPr><w:pStyle w:val="${Ref}Text"/></w:pPr>` : ""}` +
+    (i === 0 ? `<w:r><w:rPr>${styled ? `<w:rStyle w:val="${Ref}Reference"/>` : '<w:vertAlign w:val="superscript"/>'}</w:rPr><w:${k}Ref/></w:r>` : "") +
+    `<w:r><w:t xml:space="preserve">${x(i === 0 ? " " + line.replace(/^\s+/, "") : line)}</w:t></w:r></w:p>`).join("");
+}
+export function emptyNotesXml(kind) {
+  const k = kind === "e" || kind === "endnote" ? "endnote" : "footnote";
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    `<w:${k}s xmlns:w="${W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+    `<w:${k} w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p></w:${k}>` +
+    `<w:${k} w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:${k}>` +
+    `</w:${k}s>`;
+}
+// a run's words with its note marks: [{ t } | { note: [kind, id] }]
+export function splitNotes(t) {
+  const out = [];
+  let at = 0;
+  for (const m of String(t).matchAll(NOTE_RE)) {
+    if (m.index > at) out.push({ t: t.slice(at, m.index) });
+    out.push({ note: [m[1], m[2]] });
+    at = m.index + m[0].length;
+  }
+  if (at < t.length) out.push({ t: t.slice(at) });
+  return out;
+}
+
+function stylesXml(font, opts = {}) {
+  const sz = opts.size || 24, line = opts.line || 276;
   const f = xa(font);
   let heads = "";
   for (let k = 1; k <= 6; k++) {
@@ -454,8 +524,8 @@ function stylesXml(font) {
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     `<w:styles xmlns:w="${W}">` +
     `<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="${f}" w:hAnsi="${f}" w:eastAsia="${f}" w:cs="${f}"/>` +
-    '<w:sz w:val="24"/><w:szCs w:val="24"/><w:lang w:val="en-GB"/></w:rPr></w:rPrDefault>' +
-    '<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>' +
+    `<w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/><w:lang w:val="en-GB"/></w:rPr></w:rPrDefault>` +
+    `<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="${line}" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>` +
     '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>' +
     heads +
     '<w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:qFormat/>' +
@@ -465,7 +535,7 @@ function stylesXml(font) {
     '<w:style w:type="paragraph" w:styleId="Code"><w:name w:val="Code"/><w:basedOn w:val="Normal"/>' +
     '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas"/><w:sz w:val="20"/></w:rPr></w:style>' +
     '<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/>' +
-    '<w:rPr><w:color w:val="1A5FB4"/><w:u w:val="single"/></w:rPr></w:style>' +
+    '<w:rPr><w:color w:val="1A5FB4"/><w:u w:val="single"/></w:rPr></w:style>' + NOTE_STYLES +
     "</w:styles>";
 }
 
@@ -494,14 +564,14 @@ function numberingXml(nOrdered) {
     "</w:numbering>";
 }
 
-function rpr(f, link) {
+export function rpr(f, link) {
   let p = "";
   if (link) p += '<w:rStyle w:val="Hyperlink"/>';
   if (f.has("b")) p += "<w:b/><w:bCs/>";
   if (f.has("i")) p += "<w:i/><w:iCs/>";
   if (f.has("s")) p += "<w:strike/>";
+  if (f.has("h")) p += '<w:highlight w:val="yellow"/>';   // highlight before u: Word's order
   if (f.has("u") && !link) p += '<w:u w:val="single"/>';
-  if (f.has("h")) p += '<w:highlight w:val="yellow"/>';
   return p ? `<w:rPr>${p}</w:rPr>` : "";
 }
 
@@ -533,7 +603,7 @@ export function imageSize(b) {
   return null;
 }
 
-function extOf(b) {
+export function extOf(b) {
   if (b[0] === 0x89 && b[1] === 0x50) return ["png", "image/png"];
   if (b[0] === 0x47 && b[1] === 0x49) return ["gif", "image/gif"];
   if (b[0] === 0x42 && b[1] === 0x4D) return ["bmp", "image/bmp"];
@@ -542,8 +612,25 @@ function extOf(b) {
 }
 
 // lines (wordio's) -> a .docx Blob. pictureBytes(img) -> Promise<Uint8Array|null>
-export async function writeDocx(lines, pictureBytes, title = "", font = "Cambria") {
-  const body = [], rels = [], media = [];
+// opts (RossDraft's Compile): size (half-points), line (240ths of a line), indent (first line, twips, for body
+// paragraphs without noIndent), justify, header (text before the page number, top right), footer ("page": the
+// number, centred at the foot), titlePage (no header or footer on page 1), margins (twips), headingsPlain
+// (headings at the body's size, not bold: the manuscript look). Lines may carry: noIndent, sceneBreak, titlePage.
+// a table (Compile's ln.table: rows of cells' text), the text's width shared out evenly, thin borders
+export function tableXml(rows, width = 9072) {
+  const n = Math.max(1, ...rows.map((r) => r.length));
+  const cw = Math.floor(width / n);
+  const b = (side) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="808080"/>`;
+  return `<w:tbl><w:tblPr><w:tblW w:w="${cw * n}" w:type="dxa"/><w:tblBorders>${["top", "left", "bottom", "right", "insideH", "insideV"].map(b).join("")}</w:tblBorders>` +
+    '<w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr>' +
+    `<w:tblGrid>${Array.from({ length: n }, () => `<w:gridCol w:w="${cw}"/>`).join("")}</w:tblGrid>` +
+    rows.map((r) => `<w:tr>${Array.from({ length: n }, (_, k) => `<w:tc><w:tcPr><w:tcW w:w="${cw}" w:type="dxa"/></w:tcPr>` +
+      `<w:p><w:pPr><w:ind w:firstLine="0"/><w:jc w:val="left"/></w:pPr>${r[k] ? `<w:r><w:t xml:space="preserve">${x(r[k])}</w:t></w:r>` : ""}</w:p></w:tc>`).join("")}</w:tr>`).join("") +
+    "</w:tbl>";
+}
+
+export async function writeDocx(lines, pictureBytes, title = "", font = "Cambria", opts = {}) {
+  const body = [], rels = [], media = [], usedNotes = [];
   const links = new Map();
   let nOrdered = 0, runId = null;
   const orderedIds = lines.map((ln) => {
@@ -585,17 +672,28 @@ export async function writeDocx(lines, pictureBytes, title = "", font = "Cambria
   for (let k = 0; k < lines.length; k++) {
     const ln = lines[k];
     const kind = ln.kind;
-    let ppr = "";
-    if (ln.code) ppr += '<w:pStyle w:val="Code"/>';
-    else if (kind && kind[0] === "h") ppr += `<w:pStyle w:val="Heading${kind[1]}"/>`;
-    else if (kind === "quote") ppr += '<w:pStyle w:val="Quote"/>';
+    if (ln.table) { body.push(tableXml(ln.table, 11906 - 2 * (opts.margins || 1417))); continue; }
+    // the paragraph's settings, in the order Word's schema has them
+    let style = "", num = "", spacing = "", ind = "", jc = "";
+    if (ln.code) style = '<w:pStyle w:val="Code"/>';
+    else if (kind && kind[0] === "h") style = `<w:pStyle w:val="Heading${kind[1]}"/>`;
+    else if (kind === "quote") style = '<w:pStyle w:val="Quote"/>';
     else if (kind === "ul" || kind === "ol") {
-      ppr += `<w:pStyle w:val="ListParagraph"/><w:numPr><w:ilvl w:val="${Math.min(8, Math.max(0, (ln.depth || 1) - 1))}"/>` +
+      style = '<w:pStyle w:val="ListParagraph"/>';
+      num = `<w:numPr><w:ilvl w:val="${Math.min(8, Math.max(0, (ln.depth || 1) - 1))}"/>` +
         `<w:numId w:val="${kind === "ul" ? 1 : orderedIds[k]}"/></w:numPr>`;
     }
-    if (ln.pageBreak) ppr += "<w:pageBreakBefore/>";
-    else if (ln.gapBefore) ppr += '<w:spacing w:before="360"/>';
-    if (ln.align && !ln.code) ppr += `<w:jc w:val="${ln.align === "justify" ? "both" : ln.align}"/>`;
+    const isBody = !kind && !ln.code && !ln.sceneBreak && !ln.titlePage;
+    if (ln.titlePage === "title") spacing = '<w:spacing w:before="4320" w:after="240"/>';
+    else if (ln.titlePage) spacing = `<w:spacing w:before="${ln.titlePage === "words" ? 480 : 120}"/>`;
+    else if (ln.sceneBreak && !opts.headingsPlain) spacing = '<w:spacing w:before="240" w:after="240"/>';
+    else if (kind === "h1" && opts.headingsPlain) spacing = '<w:spacing w:before="2880" w:after="480"/>';
+    else if (ln.gapBefore && !ln.pageBreak) spacing = '<w:spacing w:before="360"/>';
+    if (opts.indent && isBody && !ln.noIndent && !ln.align) ind = `<w:ind w:firstLine="${opts.indent}"/>`;
+    const align = ln.align || ((kind === "h1" || kind === "h2") && opts.headingsPlain ? "center" : null) ||
+      (opts.justify && isBody ? "justify" : null);
+    if (align && !ln.code) jc = `<w:jc w:val="${align === "justify" ? "both" : align}"/>`;
+    const ppr = style + (ln.pageBreak ? "<w:pageBreakBefore/>" : "") + num + spacing + ind + jc;
     let out = "<w:p>" + (ppr ? `<w:pPr>${ppr}</w:pPr>` : "");
     for (const r of ln.runs || []) {
       if (r.img) { out += await pictureXml(r.img); continue; }
@@ -603,6 +701,20 @@ export async function writeDocx(lines, pictureBytes, title = "", font = "Cambria
       if (!t) continue;
       const f = ln.code ? new Set() : r.f || new Set();
       const href = r.href;
+      // the title page's title, larger; a plain manuscript heading, the body's size and weight
+      const extra = ln.titlePage === "title" ? `<w:sz w:val="${opts.headingsPlain ? 28 : 48}"/><w:szCs w:val="${opts.headingsPlain ? 28 : 48}"/>` :
+        kind && kind[0] === "h" && opts.headingsPlain ? `<w:b w:val="0"/><w:sz w:val="${opts.size || 24}"/><w:szCs w:val="${opts.size || 24}"/>` : "";
+      if (extra && !href) { const rp = rpr(f, false); out += `<w:r>${rp ? rp.replace("</w:rPr>", extra + "</w:rPr>") : `<w:rPr>${extra}</w:rPr>`}<w:t xml:space="preserve">${x(t)}</w:t></w:r>`; continue; }
+      if (t.includes(NOTE_A)) {
+        for (const piece of splitNotes(t)) {
+          if (piece.note) {
+            const k = piece.note[0] === "e" ? "endnote" : "footnote";
+            usedNotes.push(piece.note[0] + piece.note[1]);
+            out += `<w:r><w:rPr><w:rStyle w:val="${k === "footnote" ? "Footnote" : "Endnote"}Reference"/></w:rPr><w:${k}Reference w:id="${piece.note[1]}"/></w:r>`;
+          } else out += `<w:r>${rpr(f, false)}<w:t xml:space="preserve">${x(piece.t)}</w:t></w:r>`;
+        }
+        continue;
+      }
       if (href && !ln.code) {
         let rid = links.get(href);
         if (!rid) { rid = rel(href, "hyperlink", true); links.set(href, rid); }
@@ -615,9 +727,35 @@ export async function writeDocx(lines, pictureBytes, title = "", font = "Cambria
     `<w:document xmlns:w="${W}" xmlns:r="${R}" ` +
     'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
     `xmlns:a="${A_}" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
-    `<w:body>${body.join("") || "<w:p/>"}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>` +
-    '<w:pgMar w:top="1417" w:right="1417" w:bottom="1417" w:left="1417" w:header="708" w:footer="708" w:gutter="0"/>' +
+    `<w:body>${body.join("") || "<w:p/>"}<w:sectPr>` +
+    (opts.header != null ? `<w:headerReference w:type="default" r:id="rIdHd1"/>` : "") +
+    (opts.footer ? `<w:footerReference w:type="default" r:id="rIdFt1"/>` : "") +
+    '<w:pgSz w:w="11906" w:h="16838"/>' +
+    `<w:pgMar w:top="${opts.margins || 1417}" w:right="${opts.margins || 1417}" w:bottom="${opts.margins || 1417}" w:left="${opts.margins || 1417}" w:header="708" w:footer="708" w:gutter="0"/>` +
+    (opts.titlePage ? "<w:titlePg/>" : "") +
     "</w:sectPr></w:body></w:document>";
+  const pageField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
+  const hf = (tag, jcv, text) => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    `<w:${tag} xmlns:w="${W}" xmlns:r="${R}"><w:p><w:pPr><w:jc w:val="${jcv}"/></w:pPr>` +
+    (text ? `<w:r><w:t xml:space="preserve">${x(text)}</w:t></w:r>` : "") + pageField + `</w:p></w:${tag}>`;
+  // the notes the text has (opts.notes: "f17" -> its words)
+  const noteParts = [];
+  for (const [kind, k] of [["f", "footnote"], ["e", "endnote"]]) {
+    const ids = usedNotes.filter((n) => n[0] === kind).map((n) => n.slice(1));
+    if (!ids.length) continue;
+    const xmlText = emptyNotesXml(kind).replace(`</w:${k}s>`, ids.map((id) =>
+      `<w:${k} w:id="${id}">${noteParasXml(kind, (opts.notes && opts.notes.get(kind + id)) || "")}</w:${k}>`).join("") + `</w:${k}s>`);
+    noteParts.push([`word/${k}s.xml`, xmlText, k]);
+    rels.push(`<Relationship Id="rId${k === "footnote" ? "Fn" : "En"}1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${k}s" Target="${k}s.xml"/>`);
+  }
+  if (noteParts.length) {
+    rels.push('<Relationship Id="rIdSet1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>');
+    noteParts.push(["word/settings.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + `<w:settings xmlns:w="${W}">` +
+      noteParts.map(([, , k]) => `<w:${k}Pr><w:${k} w:id="-1"/><w:${k} w:id="0"/></w:${k}Pr>`).join("") + "</w:settings>", "settings"]);
+  }
+  if (opts.header != null) rels.push('<Relationship Id="rIdHd1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>');
+  if (opts.footer) rels.push('<Relationship Id="rIdFt1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>');
   const docRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PR}">` +
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
     '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>' +
@@ -632,6 +770,9 @@ export async function writeDocx(lines, pictureBytes, title = "", font = "Cambria
     '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
     '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>' +
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+    noteParts.map(([n, , k]) => `<Override PartName="/${n}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${k}${k === "settings" ? "" : "s"}+xml"/>`).join("") +
+    (opts.header != null ? '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>' : "") +
+    (opts.footer ? '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>' : "") +
     "</Types>";
   const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${PR}">` +
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
@@ -646,7 +787,10 @@ export async function writeDocx(lines, pictureBytes, title = "", font = "Cambria
     `<dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`;
   return zip([
     ["[Content_Types].xml", types, true], ["_rels/.rels", rootRels, true], ["docProps/core.xml", core, true],
-    ["word/document.xml", document, true], ["word/styles.xml", stylesXml(font), true],
+    ["word/document.xml", document, true], ["word/styles.xml", stylesXml(font, opts), true],
+    ...(opts.header != null ? [["word/header1.xml", hf("hdr", "right", opts.header), true]] : []),
+    ...noteParts.map(([n, t]) => [n, t, true]),
+    ...(opts.footer ? [["word/footer1.xml", hf("ftr", "center", ""), true]] : []),
     ["word/numbering.xml", numberingXml(nOrdered), true], ["word/_rels/document.xml.rels", docRels, true],
     ...media.map(([n, d]) => ["word/media/" + n, d, false]),
   ]);

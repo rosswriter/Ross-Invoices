@@ -12,9 +12,10 @@
 //
 // For the rest of Ross Note an entry looks like a note: its text is "# Title" and the scene as Markdown,
 // with the scene's pictures as media/<id>/<name> (kept in memory, never written as files).
-import * as md from "./md.js?v=2.1.2";
-import * as wordio from "./wordio.js?v=2.1.2";
-import { blockers, patchDocx, sigOf, readComments, commentEdit } from "./wordpatch.js?v=2.1.2";
+import * as md from "./md.js?v=1.8.3";
+import * as wordio from "./wordio.js?v=1.8.3";
+import { blockers, patchDocx, sigOf, readComments, commentEdit } from "./wordpatch.js?v=1.8.3";
+import * as rtf from "./rtf.js?v=1.9.20";
 
 export const PROJECT_EXT = ".rwproj";
 const FORMAT = "ross-writer-project";
@@ -81,6 +82,27 @@ export async function findProjectFiles(dir) {
   return out.sort();
 }
 
+// 1.9.2: every project in a folder and the folders inside it (Android's picker gives a folder, not the .rwproj
+// file: the one holding your projects will do). A project's own folder isn't looked into further.
+// RossDraft 1.3: Scrivener projects (.scrivx in a .scriv folder) are found too
+let EXTS = [PROJECT_EXT];
+export function alsoScrivener() { EXTS = [PROJECT_EXT, ".scrivx"]; }
+const SKIP_DIRS = new Set(["scenes", "trash", "research", "node_modules", "word copies", "backups"]);
+export async function findProjects(dir, depth = 3, path = "", out = [], seen = { n: 0 }) {
+  if (seen.n++ > 400) return out;
+  const subs = [];
+  let here = [];
+  for await (const [name, h] of dir.entries()) {
+    if (h.kind === "file" && EXTS.some((x) => name.toLowerCase().endsWith(x))) here.push(name);
+    else if (h.kind === "directory" && !name.startsWith(".") && !SKIP_DIRS.has(name.toLowerCase())) subs.push([name, h]);
+  }
+  for (const f of here.sort()) out.push({ dir, file: f, path: path ? path + "/" + dir.name : dir.name });
+  if (here.length || depth <= 0) return out;
+  subs.sort((a, b) => a[0].localeCompare(b[0]));
+  for (const [name, h] of subs) await findProjects(h, depth - 1, path ? path + "/" + dir.name : dir.name, out, seen);
+  return out;
+}
+
 export class ProjectStore {
   constructor(dirHandle, fileName) {
     this.isProject = true;
@@ -118,17 +140,29 @@ export class ProjectStore {
     this.data = data;
     this.jsonModified = f.lastModified;
     const root = new PNote(null, null);
-    const build = async (parent, list) => {
+    const all = [];
+    const build = (parent, list) => {
       for (const raw of list) {
         if (!raw || typeof raw !== "object") continue;
         if (!raw.id) raw.id = newId();
         const n = new PNote(parent, raw);
         parent.children.push(n);
-        await this.load(n);
-        if (Array.isArray(raw.children)) await build(n, raw.children);
+        all.push(n);
+        if (Array.isArray(raw.children)) build(n, raw.children);
       }
     };
-    await build(root, data.nodes);
+    build(root, data.nodes);
+    // the scenes read side by side (a few at once: Android answers each file call slowly), counted as they come
+    let done = 0, next = 0;
+    const worker = async () => {
+      while (next < all.length) {
+        const n = all[next++];
+        await this.load(n);
+        done++;
+        if (this.onProgress) this.onProgress(done, all.length);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, all.length) }, worker));
     this.root = root;
     return root;
   }
@@ -151,7 +185,8 @@ export class ProjectStore {
     if (raw.pdf) {
       n.readOnly = ["a PDF"];
       n.text = md.serialize([this.titleLine(n), { kind: null, mark: null, runs: [] },
-        { kind: null, mark: null, runs: [{ t: "A PDF: " + String(raw.pdf).split(/[\\/]/).pop() + ". Open it in Ross Writer.", f: new Set() }]}]);
+        { kind: null, mark: null, runs: [{ t: /^([a-z]:[\\/]|[\\/])/i.test(raw.pdf) ? `A PDF kept outside the project, on the laptop (${raw.pdf}): open it there, or add it again here (Notes ▸ Add a PDF…).`
+          : "A PDF: " + String(raw.pdf).split(/[\\/]/).pop() + ".", f: new Set() }]}]);
       return n.text;
     }
     let file = null, missing = null;
@@ -182,6 +217,7 @@ export class ProjectStore {
       n.text = known.shown != null && known.shownTitle === n.title() ? known.shown : this.withTitle(n, known);
       n.readOnly = known.readOnly;
       n.comments = known.comments || [];
+      if (!n.fnDirty) n.fnotes = new Map(known.notes || []);
       n.modified = file.lastModified;
       return n.text;
     }
@@ -200,6 +236,8 @@ export class ProjectStore {
     this.scenes.set(raw.id, sc);
     n.readOnly = sc.readOnly;
     n.comments = sc.comments || [];
+    n.fnotes = new Map(sc.notes || []);     // RossDraft 1.2: the scene's footnotes and endnotes, "f17" -> words
+    n.fnDirty = false;
     n.modified = file.lastModified;
     n.text = this.withTitle(n, sc);
     if (!sc.readOnly && sc.files) this.template = sc;
@@ -233,7 +271,8 @@ export class ProjectStore {
     const sigs = back.length === kept.length ? back.map(sigOf).concat(got.lines.slice(kept.length).map(sigOf)) : null;
     let comments = [];
     try { comments = await readComments(got.files); } catch (e) { comments = []; }
-    return { lines: got.lines, sigs, files: got.files, trailing, readOnly: ro.length ? ro : null, noteLines, text, comments };
+    return { lines: got.lines, sigs, files: got.files, trailing, readOnly: ro.length ? ro : null, noteLines, text, comments,
+      notes: got.notes || new Map() };
   }
 
   // the scene's own pictures by their names (as the scene has them); others stay as they are
@@ -306,12 +345,13 @@ export class ProjectStore {
     for (let k = 0; sc && k < sc.trailing; k++) wl.push({ kind: null, depth: 1, code: false, runs: [] });
     const bytes = (img) => this.pictureBytes(img);
     let blob;
-    if (sc && sc.files) blob = await patchDocx(sc.files, sc.lines, sc.sigs, wl, bytes);
+    const notes = n.fnotes || new Map();
+    if (sc && sc.files) blob = await patchDocx(sc.files, sc.lines, sc.sigs, wl, bytes, notes);
     else {
       const tpl = await this.findTemplate();
       // a new scene: made from another of the project's (its look); none to follow, a plain one
-      blob = tpl ? await patchDocx(tpl.files, tpl.lines, tpl.sigs, wl, bytes)
-        : await wordio.writeDocx(wl, bytes, raw.title || "", "Cambria");
+      blob = tpl ? await patchDocx(tpl.files, tpl.lines, tpl.sigs, wl, bytes, notes, true)
+        : await wordio.writeDocx(wl, bytes, raw.title || "", "Cambria", { notes });
     }
     if (!raw.file) raw.file = SCENES + "/" + raw.id + ".docx";
     const [d, name] = await this.sceneFile(raw, true);
@@ -319,6 +359,7 @@ export class ProjectStore {
     raw.modified = nowIso();
     await this.saveProject();
     // read back what's there now: the next save is made against it
+    n.fnDirty = false;
     await this.load(n, true);
     n.text = text;
     const now = this.scenes.get(raw.id);
@@ -476,6 +517,57 @@ export class ProjectStore {
 
   async hasWordCopy() { return false; }
   async writeWordCopy() { throw new Error("Word copies are for notes in RossNotes"); }
+
+  // RossDraft 1.4: a PDF entry's file (research), kept in the project as Ross Writer keeps it
+  // ("Attachments/<title>/<name>.pdf"); one kept elsewhere on the laptop can't be reached from here
+  async pdfFile(n) {
+    const rel = n.raw && n.raw.pdf;
+    if (!rel || /^([a-z]:[\\/]|[\\/])/i.test(rel)) return null;
+    const parts = String(rel).split(/[\\/]+/).filter(Boolean);
+    try {
+      let d = this.handle;
+      for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p);
+      return await (await d.getFileHandle(parts[parts.length - 1])).getFile();
+    } catch (e) { return null; }
+  }
+
+  // Notes ▸ Add a PDF…: a PDF entry (left out of Compile), its file copied into the project, as Ross Writer
+  async addPdf(parent, index, title, file) {
+    const t = nowIso();
+    const safe = rwSafeName(title) || "PDF";
+    const att = await (await this.handle.getDirectoryHandle("Attachments", { create: true })).getDirectoryHandle(safe, { create: true });
+    let name = file.name.replace(/[\\/:*?"<>|]+/g, " ").trim() || safe + ".pdf", k = 2;
+    const stem = name.replace(/\.pdf$/i, "");
+    for (;;) { try { await att.getFileHandle(name); name = `${stem} (${k++}).pdf`; } catch (e) { break; } }
+    await writeFile(att, name, file);
+    const rel = `Attachments/${safe}/${name}`;
+    const raw = { id: newId(), title, flag: "", include: false, expanded: true, file: null, pdf: rel, attachments: [rel], created: t, modified: t };
+    const n = new PNote(parent, raw);
+    const list = this.rawList(parent);
+    if (index == null || index >= parent.children.length) { parent.children.push(n); list.push(raw); }
+    else { const before = parent.children[index]; parent.children.splice(index, 0, n); list.splice(list.indexOf(before.raw), 0, raw); }
+    await this.saveProject();
+    await this.load(n);
+    return n;
+  }
+
+  // several entries read at once (exports, word counts)
+  async readAll(notes) {
+    let next = 0;
+    const worker = async () => { while (next < notes.length) { const n = notes[next++]; try { await this.read(n); } catch (e) { /* as we had it */ } } };
+    await Promise.all(Array.from({ length: Math.min(6, notes.length) }, worker));
+  }
+
+  // a new entry made in one go (imports): its text's first line is its title
+  async addNote(parent, index, title, textFor) {
+    const n = await this.newNote(parent, index, "");
+    const text = typeof textFor === "function" ? await textFor(n) : (textFor || "");
+    await this.write(n, text);
+    return n;
+  }
+
+  // the order is the project file's, written with each change
+  async writeOrder() { /* nothing to do */ }
 }
 
 // ------------------------------------------------------------------ a Word document opened by itself
@@ -602,4 +694,104 @@ export class MdFileStore {
   async pictureFile() { throw new Error("no such picture"); }
   async hasWordCopy() { return false; }
   async writeWordCopy() { throw new Error("Word copies are for notes in RossNotes"); }
+
+  // several entries read at once (exports, word counts)
+  async readAll(notes) {
+    let next = 0;
+    const worker = async () => { while (next < notes.length) { const n = notes[next++]; try { await this.read(n); } catch (e) { /* as we had it */ } } };
+    await Promise.all(Array.from({ length: Math.min(6, notes.length) }, worker));
+  }
+
+  // a new entry made in one go (imports): its text's first line is its title
+  async addNote(parent, index, title, textFor) {
+    const n = await this.newNote(parent, index, "");
+    const text = typeof textFor === "function" ? await textFor(n) : (textFor || "");
+    await this.write(n, text);
+    return n;
+  }
+
+  // the order is the project file's, written with each change
+  async writeOrder() { /* nothing to do */ }
+}
+
+// ------------------------------------------------------------------ an RTF document opened by itself (RossDraft 1.0.2)
+// Read into the page as a Word document is (rtf.readRtf), saved straight back into it (rtf.writeRtf) in its own
+// font, size and page, each untouched paragraph with its own spacing. Tables, pictures, footnotes, tracked
+// changes, comments, drawings or embedded objects: read-only (they can't be written back faithfully).
+// Before the first save the original is kept: "<name> (original).rtf" beside it when its folder is known,
+// otherwise in RossDraft's storage (keepOriginal, set by the app).
+export class RtfStore extends MdFileStore {
+  constructor(fileHandle, dirHandle = null) {
+    super(fileHandle);
+    this.isMd = false;
+    this.isRtf = true;
+    this.dir = dirHandle;
+    this.raw = { id: "md", title: fileHandle.name.replace(/\.rtf$/i, ""), file: fileHandle.name };
+    this.look = null;
+    this.paras = [];
+    this.kept = false;
+    this.keepOriginal = null;
+  }
+
+  async load(n) {
+    const f = await this.fileHandle.getFile();
+    const got = rtf.readRtf(new Uint8Array(await f.arrayBuffer()));
+    this.look = got.look;
+    this.paras = got.paras;
+    const lines = wordio.toNoteLines(got.lines, () => null);
+    const text = md.serialize(lines, { dir: [] });
+    n.text = text;
+    n.modified = f.lastModified;
+    n.readOnly = got.blockers.length ? got.blockers : (this.canWrite ? null : ["no permission to save into it"]);
+    const t = md.titleOf(text);
+    if (t) this.raw.title = t;
+    return text;
+  }
+
+  async scan() {
+    const root = await super.scan();
+    return root;
+  }
+
+  async keepFirst() {
+    if (this.kept) return;
+    const f = await this.fileHandle.getFile();
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    const name = this.fileName.replace(/\.rtf$/i, "") + " (original).rtf";
+    if (this.dir) {
+      let there = false;
+      try { await this.dir.getFileHandle(name); there = true; } catch (e) { there = false; }
+      if (!there) {
+        const h = await this.dir.getFileHandle(name, { create: true });
+        const w = await h.createWritable();
+        await w.write(bytes);
+        await w.close();
+      }
+      this.keptWhere = name;
+    } else if (this.keepOriginal) {
+      await this.keepOriginal(this.fileName, bytes);
+      this.keptWhere = "RossDraft";
+    }
+    this.kept = true;
+  }
+
+  async write(n, text) {
+    if (n.readOnly) throw new Error(`“${this.fileName}” can't be saved here: it has ${n.readOnly.join(", ")}.`);
+    await this.keepFirst();
+    const lines = wordio.fromNoteLines(md.parse(text));
+    const isEmpty = (ln) => !ln.kind && !ln.code && !(ln.runs || []).some((r) => r.img || (r.t || "").trim());
+    while (lines.length && isEmpty(lines[lines.length - 1])) lines.pop();
+    const out = await rtf.writeRtf(lines, { look: this.look, paras: this.paras, title: this.raw.title });
+    const w = await this.fileHandle.createWritable();
+    await w.write(new Blob([out], { type: "application/rtf" }));
+    await w.close();
+    // read back what's there now: the next save is made against it
+    const f = await this.fileHandle.getFile();
+    const got = rtf.readRtf(new Uint8Array(await f.arrayBuffer()));
+    this.paras = got.paras;
+    n.text = text;
+    n.modified = f.lastModified;
+    const t = md.titleOf(text);
+    if (t) this.raw.title = t;
+  }
 }

@@ -1,6 +1,6 @@
 // The page: one <div class="ln"> per line of the note, with the formatting as
 // ordinary elements. Read back to lines (md.js) to save.
-import * as md from "./md.js?v=1.6.8";
+import * as md from "./md.js?v=1.9.20";
 
 const HL = "#ffd54f";
 
@@ -9,6 +9,33 @@ export function renderLines(page, lines) {
   page.textContent = "";
   for (const ln of lines) page.appendChild(lineElement(ln));
   if (!page.firstChild) page.appendChild(lineElement({ kind: null, runs: [] }));
+}
+
+// RossDraft 1.2: a footnote's or endnote's mark ("\uE000f17\uE001" in the words): a small raised number the caret
+// steps over, one character's worth of the page (its number set by numberNotes)
+const NOTE_SPLIT = /(\uE000[fe]-?\d+\uE001)/;
+export function noteElement(token) {
+  const e = document.createElement("sup");
+  e.className = "fnref";
+  e.contentEditable = "false";
+  e.dataset.m = token;
+  e.dataset.k = token.slice(1, -1);
+  e.textContent = "•";
+  return e;
+}
+// the marks numbered in order on the page: footnotes 1, 2, 3…, endnotes i, ii, iii…
+const ROMAN = (n) => { let r = ""; for (const [v, s] of [[1000, "m"], [900, "cm"], [500, "d"], [400, "cd"], [100, "c"], [90, "xc"], [50, "l"], [40, "xl"], [10, "x"], [9, "ix"], [5, "v"], [4, "iv"], [1, "i"]]) while (n >= v) { r += s; n -= v; } return r; };
+export function numberNotes(page) {
+  const k = { f: 0, e: 0 };
+  const labels = new Map();
+  for (const e of page.querySelectorAll("sup.fnref")) {
+    const kind = e.dataset.k[0];
+    k[kind] += 1;
+    const label = kind === "e" ? ROMAN(k.e) : String(k.f);
+    if (e.textContent !== label) e.textContent = label;
+    labels.set(e.dataset.k, label);
+  }
+  return labels;
 }
 
 export function lineElement(ln) {
@@ -22,6 +49,15 @@ export function lineElement(ln) {
   for (const r of ln.runs) {
     if (r.img) { div.appendChild(pictureElement(r.img)); continue; }
     if (!r.t) continue;
+    if (r.t.includes("\uE000")) {
+      // the words around a note's mark as runs of their own, the mark itself a raised number
+      for (const piece of r.t.split(NOTE_SPLIT)) {
+        if (!piece) continue;
+        if (NOTE_SPLIT.test(piece) && piece[0] === "\uE000") div.appendChild(noteElement(piece));
+        else div.appendChild(lineElement({ kind: null, runs: [{ t: piece, f: r.f, href: r.href }] }).firstChild);
+      }
+      continue;
+    }
     let node = document.createTextNode(r.t);
     const wrap = (tag, style) => {
       const e = document.createElement(tag);
@@ -107,7 +143,9 @@ export function readLine(div) {
         const { f, href } = flagsOf(c, div, heading);
         ln.runs.push({ t, f, href });
       } else if (c.nodeType === 1) {
-        if (c.tagName === "IMG" && c.classList.contains("pic")) {
+        if (c.tagName === "SUP" && c.classList.contains("fnref")) {
+          ln.runs.push({ t: c.dataset.m, f: new Set() });
+        } else if (c.tagName === "IMG" && c.classList.contains("pic")) {
           ln.runs.push({ t: md.OBJ, f: new Set(), img: {
             src: c.dataset.src, orig: c.dataset.orig || null,
             size: c.dataset.size || c.dataset.alt || "",
@@ -132,6 +170,8 @@ export function tidy(page) {
   let changed = false;
   let pending = null;
   for (const n of [...page.childNodes]) {
+    // 1.9.3: where one note ends and the next begins, on a page of several notes
+    if (n.nodeType === 1 && n.classList.contains("jdiv")) { pending = null; continue; }
     if (n.nodeType === 1 && n.classList.contains("ln") && n.tagName === "DIV") {
       pending = null;
       // a line inside a line (pasting, or the browser's own Enter)
@@ -197,6 +237,7 @@ function textLen(n) {
     for (const c of x.childNodes) {
       if (c.nodeType === 3) k += c.data.length;
       else if (c.tagName === "IMG") k += 1;
+      else if (c.tagName === "SUP" && c.classList && c.classList.contains("fnref")) k += c.dataset.m.length;
       else walk(c);
     }
   };
@@ -210,6 +251,7 @@ export function lineText(line) {
     for (const c of x.childNodes) {
       if (c.nodeType === 3) s += c.data;
       else if (c.tagName === "IMG") s += md.OBJ;
+      else if (c.tagName === "SUP" && c.classList.contains("fnref")) s += c.dataset.m;
       else walk(c);
     }
   };
@@ -227,9 +269,10 @@ export function pointAt(line, pos) {
         if (k + c.data.length >= pos) return [c, pos - k];
         k += c.data.length;
         last = [c, c.data.length];
-      } else if (c.tagName === "IMG") {
-        if (k + 1 > pos) return [c.parentNode, [...c.parentNode.childNodes].indexOf(c)];
-        k += 1;
+      } else if (c.tagName === "IMG" || (c.tagName === "SUP" && c.classList.contains("fnref"))) {
+        const len = c.tagName === "IMG" ? 1 : c.dataset.m.length;
+        if (k + len > pos) return [c.parentNode, [...c.parentNode.childNodes].indexOf(c)];
+        k += len;
         last = [c.parentNode, [...c.parentNode.childNodes].indexOf(c) + 1];
       } else if (c.tagName !== "BR") {
         const got = walk(c);
@@ -294,9 +337,10 @@ export function selectedLines(page) {
 // ------------------------------------------------------------------ list numbers, depths, the title
 export function relayout(page) {
   const lines = [...page.children];
-  const st = new md.ListState();
+  let st = new md.ListState();
   let titled = false;
   for (const div of lines) {
+    if (div.classList.contains("jdiv")) { st = new md.ListState(); titled = false; continue; }   // the next note
     const ln = { kind: div.dataset.kind || null, mark: div.dataset.mark || null,
       raw: div.dataset.raw != null ? div.dataset.raw : null, code: !!div.dataset.code };
     const { depth, number } = st.step(ln);
@@ -310,6 +354,7 @@ export function relayout(page) {
     div.classList.toggle("title", !!has && !(ln.kind && ln.kind[0] === "h"));
     if (has) titled = true;
   }
+  if (page.querySelector("sup.fnref")) numberNotes(page);   // (RossDraft 1.2: the notes' numbers in order)
 }
 
 // ------------------------------------------------------------------ text pasted or dropped in
@@ -335,7 +380,7 @@ export function linesFromHtml(html) {
       const t = c.tagName;
       if (t === "SCRIPT" || t === "STYLE" || t === "HEAD" || t === "TITLE" || t === "META") continue;
       if (t === "BR") { newLine(kind === "ul" || kind === "ol" ? null : kind === "quote" ? "quote" : null); continue; }
-      if (t === "IMG") continue;
+      if (t === "IMG" || (t === "SUP" && c.classList.contains("fnref"))) continue;   // (a note's mark isn't pasted)
       const f2 = new Set(f);
       let href2 = href, kind2 = kind;
       if (t === "B" || t === "STRONG") f2.add("b");

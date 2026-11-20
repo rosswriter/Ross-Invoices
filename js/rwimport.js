@@ -1,7 +1,7 @@
 // Ross Writer projects, brought in as notes (File ▸ Import a Ross Writer Project…). Loaded only then.
 // A project is a folder holding <name>.rwproj (JSON: the tree of chapters and scenes, their titles and order)
 // and Scenes/<id>.docx, a Word file for each entry. Nothing in the project is changed: it's only read.
-import { unzip } from "./wordio.js?v=1.6.8";
+import { unzip } from "./wordio.js?v=1.8.3";
 
 const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const W14 = "http://schemas.microsoft.com/office/word/2010/wordml";

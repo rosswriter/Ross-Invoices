@@ -2,7 +2,7 @@
 // same way as the laptop's notebooks.py (and notesio.html_to_markdown).
 // NoteCase Pro (.ncdb) is an SQLite file: read with sql.js, loaded only here.
 // FeatherNotes (.fnx) is XML with each note's words as Qt rich text (HTML).
-import * as md from "./md.js?v=1.6.8";
+import * as md from "./md.js?v=1.8.3";
 
 const OBJ = md.OBJ;
 const NC_TAGS = { 1: "b", 3: "i", 5: "u" };

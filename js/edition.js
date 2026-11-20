@@ -1,14 +1,6 @@
-// Which edition of the app this is. The code is the same for every edition;
-// this file (with the icons and manifest) is what differs. Each edition keeps
-// its data in its own database, so two can sit on one tablet without meeting.
-export const EDITION = {
-  id: "ross-invoices",
-  name: "Ross Invoices",
-  db: "ross-invoices",
-  laptop: true,            // there's a laptop program to swap files with
-  // starting settings for a fresh install (anything not here: the usual defaults)
-  settings: {
-    heading: "Ross Invoices",
-    business: { name: "Jacob Ross" },
-  },
-};
+// Which edition this is. One set of code makes both (tools/build_editions.py writes this file for each):
+//   Ross Note V9: your notes first, with Ross Writer projects and Word documents.
+//   RossDraft:    projects first, with the project panel (synopsis and notes, status, targets, Include in
+//                 Compile, drag and drop) and, stage by stage, the rest of Ross Writer's project features.
+// key: the name of its settings and storage on the tablet (V9 keeps the v7full names it always had).
+export const ED = { id: "v9", name: "Ross Note V9", short: "V9", key: "rossnote-v7full", project: false };

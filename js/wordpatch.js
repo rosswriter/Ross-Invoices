@@ -13,7 +13,7 @@
 //
 // Scenes with things this can't keep (footnotes, tracked changes, tables...) aren't written
 // at all: blockers() says which, and the tablet shows them read-only.
-import { unzip, zip, imageSize, extOf } from "./wordio.js?v=2.1.2";
+import { unzip, zip, imageSize, extOf, noteToken, splitNotes, noteParasXml, emptyNotesXml, NOTE_A, NOTE_STYLES } from "./wordio.js?v=1.8.3";
 
 const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -28,7 +28,7 @@ const TEXT_WIDTH_EMU = 5760720;
 
 // ------------------------------------------------------------------ what the tablet can't keep
 const BLOCKERS = [
-  [/<w:footnoteReference\b|<w:endnoteReference\b/, "footnotes"],
+  // (RossDraft 1.2: footnotes and endnotes are kept and edited: their marks are in the page's words)
   [/<w:(ins|del|moveFrom|moveTo)\b|<w:(rPr|pPr|sectPr|tblPr|tcPr|trPr)Change\b/, "tracked changes"],
   [/<w:tbl\b/, "a table"],
   [/<w:txbxContent\b|<mc:AlternateContent\b|<w:object\b/, "a text box or shape"],
@@ -63,7 +63,9 @@ function sigOf(ln) {
     else runs.push([t, f, h, ""]);
   }
   const k = ln.kind || "";
-  return JSON.stringify([k, k === "ul" || k === "ol" ? ln.depth || 1 : 0, ln.code ? 1 : 0, runs]);
+  const sig = [k, k === "ul" || k === "ol" ? ln.depth || 1 : 0, ln.code ? 1 : 0, runs];
+  if (ln.align && !ln.code) sig.push(ln.align);       // (unaligned lines' signatures as before 1.8.3)
+  return JSON.stringify(sig);
 }
 
 // a picture's file name, wherever it's written from (wordio's name, or a note's picture)
@@ -178,6 +180,7 @@ function textAndMarks(p) {
       } else if (isRef(c)) {
         marks.push({ node: c, kind: "ref", id: wval(wkid(c, "commentReference"), "id"), off: text.length });
       } else if (l === "t") text += c.textContent;
+      else if (l === "footnoteReference" || l === "endnoteReference") text += noteToken(l[0], wval(c, "id"));
       else if (l === "tab" || l === "noBreakHyphen") text += l === "tab" ? " " : "-";
       else if (l === "drawing" || l === "pict") text += OBJ;
       else if (l === "pPr" || l === "rPr" || l === "del" || l === "moveFrom") continue;
@@ -205,6 +208,7 @@ function mapOffset(oldT, newT, off, kind) {
 // of text, tabs and pictures kept on either side). A run inside something else (a tracked change, a field) isn't
 // split: the mark goes before it (a start) or after it (an end), so the comment covers it whole.
 const runLen = (c) => (c.namespaceURI !== W ? 0 : c.localName === "t" ? c.textContent.length
+  : c.localName === "footnoteReference" || c.localName === "endnoteReference" ? noteToken(c.localName[0], wval(c, "id")).length
   : ["tab", "noBreakHyphen", "drawing", "pict"].includes(c.localName) ? 1 : 0);
 
 function placeAt(doc, p, off, node, kind = "start") {
@@ -349,7 +353,10 @@ function resolveTarget(base, target) {   // a relationship's target, as a part n
 // files: wordio.unzip()'s map of the scene; old: readDocx(.., {keep}) lines of it (each with .src);
 // oldSigs: their signatures as the note shows them (or null: from old); lines: wordio lines to write;
 // pictureBytes(img) -> Uint8Array|null for pictures that aren't in the scene already.
-export async function patchDocx(files, old, oldSigs, lines, pictureBytes) {
+// notes (RossDraft 1.2): the scene's footnotes and endnotes, "f17" -> their words; those the text still marks are
+// kept (rewritten only if their words changed, or all when forceNotes), new ones added, the rest dropped.
+// Without notes, the Word file's notes are left as they are.
+export async function patchDocx(files, old, oldSigs, lines, pictureBytes, notes = null, forceNotes = false) {
   const all = await loadAll(files);
   const mainPart = (() => {
     const rels = all.get("_rels/.rels");
@@ -400,6 +407,7 @@ export async function patchDocx(files, old, oldSigs, lines, pictureBytes) {
     Hyperlink: '<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/>' +
       '<w:rPr><w:color w:val="1A5FB4"/><w:u w:val="single"/></w:rPr></w:style>',
   };
+  for (const m of NOTE_STYLES.matchAll(/<w:style [^>]*w:styleId="(\w+)"[\s\S]*?<\/w:style>/g)) OUR_STYLES[m[1]] = m[0];
   for (let k = 1; k <= 6; k++) {
     OUR_STYLES["Heading" + k] = `<w:style w:type="paragraph" w:styleId="Heading${k}"><w:name w:val="heading ${k}"/>` +
       '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/>' +
@@ -598,6 +606,13 @@ export async function patchDocx(files, old, oldSigs, lines, pictureBytes) {
   const kindKey = (ln) => (ln.code ? "code" : ln.kind || "p");
 
   const buildP = async (ln, j, tmpl, oneToOne) => {
+    if (ln.table) {
+      const { tableXml } = await import("./wordio.js?v=1.9.20");
+      const pgSz = sectPr && wkid(sectPr, "pgSz"), pgMar = sectPr && wkid(sectPr, "pgMar");
+      const num = (el, a, d) => { const v = el && (el.getAttributeNS(W, a) || el.getAttribute("w:" + a)); return v ? parseInt(v, 10) : d; };
+      const width = num(pgSz, "w", 11906) - num(pgMar, "left", 1417) - num(pgMar, "right", 1417);
+      return parse(`<w:x xmlns:w="${W}">${tableXml(ln.table, width)}</w:x>`).documentElement.firstElementChild;
+    }
     const kind = ln.code ? null : ln.kind || null;
     const p = doc.createElementNS(W, "w:p");
     const same = !!(tmpl && tmpl.el && tmpl.key === kindKey(ln));
@@ -649,6 +664,19 @@ export async function patchDocx(files, old, oldSigs, lines, pictureBytes) {
         il.setAttributeNS(W, "w:val", String(lvl));
       }
     } else dropNum();
+    // alignment: the line's own, as Word's jc; a line put back to the left loses its centring
+    if (!ln.code) {
+      const jc = ppr && wkid(ppr, "jc");
+      const want = ln.align === "justify" ? "both" : ln.align || null;
+      if (want) {
+        const j2 = jc || ensurePpr().appendChild(doc.createElementNS(W, "w:jc"));
+        j2.setAttributeNS(W, "w:val", want);
+      } else if (jc && ["center", "right", "end", "both", "distribute"].includes(jc.getAttributeNS(W, "val") || jc.getAttribute("w:val"))) {
+        ppr.removeChild(jc);
+      }
+    }
+    // RossDraft's Compile: a chapter on a new page
+    if (ln.pageBreak && !(ppr && wkid(ppr, "pageBreakBefore"))) ensurePpr().appendChild(doc.createElementNS(W, "w:pageBreakBefore"));
     if (ppr) { sortPpr(ppr); if (ppr.children.length) p.appendChild(ppr); }
     // the look of the words: the old paragraph's, or one like it; headings and the like without one
     // take their style's own (no run look), plain text the scene's usual
@@ -672,9 +700,18 @@ export async function patchDocx(files, old, oldSigs, lines, pictureBytes) {
       if (f.has("h")) add("highlight", "yellow");
       if (f.has("u") && !r.href) add("u", "single");
       sortRpr(rp);
-      const rx = (rp.children.length ? ser(rp) : "") + `<w:t xml:space="preserve">${xt(t)}</w:t>`;
-      if (r.href && !ln.code) xml += `<w:hyperlink r:id="${linkRel(r.href)}"><w:r>${rx}</w:r></w:hyperlink>`;
-      else xml += `<w:r>${rx}</w:r>`;
+      const pieces = t.includes(NOTE_A) && !ln.code ? splitNotes(t) : [{ t }];
+      for (const piece of pieces) {
+        if (piece.note) {
+          const k = piece.note[0] === "e" ? "endnote" : "footnote";
+          const sid = styleFor([k + " reference"], k === "footnote" ? "FootnoteReference" : "EndnoteReference");
+          xml += `<w:r><w:rPr><w:rStyle w:val="${sid}"/></w:rPr><w:${k}Reference w:id="${piece.note[1]}"/></w:r>`;
+          continue;
+        }
+        const rx = (rp.children.length ? ser(rp) : "") + `<w:t xml:space="preserve">${xt(piece.t)}</w:t>`;
+        if (r.href && !ln.code) xml += `<w:hyperlink r:id="${linkRel(r.href)}"><w:r>${rx}</w:r></w:hyperlink>`;
+        else xml += `<w:r>${rx}</w:r>`;
+      }
     }
     if (xml) {
       const frag = parse(`<w:x xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="${WP}" xmlns:a="${A_}" xmlns:pic="${PIC}">${xml}</w:x>`);
@@ -697,6 +734,7 @@ export async function patchDocx(files, old, oldSigs, lines, pictureBytes) {
   const used = new Set(), marked = new Set();
   const outEls = [];
   for (let j = 0; j < lines.length;) {
+    if (lines[j].table) { outEls.push(await buildP(lines[j], j, null, false)); j++; continue; }   // (Compile's tables: always new)
     const i = matched[j];
     if (i >= 0 && old[i].src != null) {
       const g = groupOf.get(old[i].src);
@@ -738,6 +776,63 @@ export async function patchDocx(files, old, oldSigs, lines, pictureBytes) {
   if (sectPr) body.appendChild(sectPr);
   const commentsChanged = await fixComments(doc, body, all, mainPart, relsDoc);
 
+  // --- the footnotes and endnotes (as Ross Writer's finish_notes): those the text marks kept, new ones added,
+  // the rest dropped; a note's paragraphs rewritten only when its words changed
+  const notesChanged = new Map();
+  if (notes) {
+    for (const [kind, k] of [["f", "footnote"], ["e", "endnote"]]) {
+      const want = new Set([...body.getElementsByTagNameNS(W, k + "Reference")].map((e) => wval(e, "id")));
+      let name = partByType(relsDoc, mainPart, k + "s");
+      if (!want.size && !(name && all.has(name))) continue;
+      let ndoc;
+      if (name && all.has(name)) ndoc = parse(dec(all.get(name)));
+      else {
+        name = partDir + k + "s.xml";
+        ndoc = parse(emptyNotesXml(kind));
+        addRel(k + "s", k + "s.xml");
+        addOverride("/" + name, `application/vnd.openxmlformats-officedocument.wordprocessingml.${k}s+xml`);
+        // Word lists the separators in settings.xml
+        const sName = partByType(relsDoc, mainPart, "settings");
+        if (sName && all.has(sName)) {
+          const sd = parse(dec(all.get(sName)));
+          if (!sd.getElementsByTagNameNS(W, k + "Pr").length) {
+            const el = parse(`<w:x xmlns:w="${W}"><w:${k}Pr><w:${k} w:id="-1"/><w:${k} w:id="0"/></w:${k}Pr></w:x>`).documentElement.firstElementChild;
+            sd.documentElement.appendChild(sd.importNode(el, true));
+            notesChanged.set(sName, sd);
+          }
+        }
+      }
+      const root = ndoc.documentElement;
+      const have = new Map();
+      let touched = false;
+      for (const n of [...root.getElementsByTagNameNS(W, k)]) {
+        const ty = wval(n, "type");
+        if (ty === "separator" || ty === "continuationSeparator" || ty === "continuationNotice") continue;
+        const id = wval(n, "id");
+        if (!want.has(id)) { root.removeChild(n); touched = true; } else have.set(id, n);
+      }
+      const textOf = (n) => [...n.getElementsByTagNameNS(W, "p")].map((pp) => {
+        let t = "";
+        for (const el of pp.getElementsByTagNameNS(W, "*")) { if (el.localName === "t") t += el.textContent; else if (el.localName === "tab") t += " "; }
+        return t;
+      }).join("\n").replace(/^\s+/, "");
+      const ids = [...want].sort((a, b) => (+a || 0) - (+b || 0));
+      for (const id of ids) {
+        const words = notes.has(kind + id) ? notes.get(kind + id) : null;
+        let el = have.get(id);
+        if (el && (words == null || (!forceNotes && textOf(el) === words))) continue;
+        if (!el) { el = ndoc.createElementNS(W, "w:" + k); el.setAttributeNS(W, "w:id", id); root.appendChild(el); }
+        while (el.firstChild) el.removeChild(el.firstChild);
+        styleFor([k + " text"], k === "footnote" ? "FootnoteText" : "EndnoteText");
+        styleFor([k + " reference"], k === "footnote" ? "FootnoteReference" : "EndnoteReference");
+        const frag = parse(`<w:x xmlns:w="${W}">${noteParasXml(kind, words || "")}</w:x>`).documentElement;
+        for (const c of [...frag.children]) el.appendChild(ndoc.importNode(c, true));
+        touched = true;
+      }
+      if (touched) notesChanged.set(name, ndoc);
+    }
+  }
+
   // --- relationships nothing uses any more (pictures and links of paragraphs that went)
   const docXml = ser(doc);
   const usedIds = new Set();
@@ -772,6 +867,7 @@ export async function patchDocx(files, old, oldSigs, lines, pictureBytes) {
   if (stylesChanged) all.set(stylesName, ser(stylesDoc));
   if (numChanged) all.set(numName, ser(numDoc));
   for (const [name, d] of commentsChanged) all.set(name, ser(d));
+  for (const [name, d] of notesChanged) all.set(name, ser(d));
   const order = ["[Content_Types].xml", ...[...all.keys()].filter((k) => k !== "[Content_Types].xml")];
   return zip(order.map((name) => {
     const data = all.get(name);
